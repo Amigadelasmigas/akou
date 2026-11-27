@@ -376,7 +376,9 @@ export function exportedLog(bytes: Buffer): Buffer {
 function isCentroid(line: Buffer): boolean {
   if (!line.includes("speaker.centroid")) return false;
   try {
-    return (JSON.parse(line.toString("utf8")) as { type?: unknown } | null)?.type === "speaker.centroid";
+    return (
+      (JSON.parse(line.toString("utf8")) as { type?: unknown } | null)?.type === "speaker.centroid"
+    );
   } catch {
     return false;
   }

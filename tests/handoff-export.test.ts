@@ -308,9 +308,10 @@ describe("attachments", () => {
     b.add({ type: "speaker.centroid", spk: "c2", vec: "AAAAAA==" });
     const r = rig(b);
     try {
-      r.run();
       const lines = (path: string) => readFileSync(path, "utf8").split("\n").filter(Boolean);
+      // The log as the export reads it, before the export records itself in it.
       const source = lines(join(r.dir, "events.jsonl"));
+      r.run();
       const copied = lines(join(r.root, "work", "attachments", BASE, "events.jsonl"));
       const isCentroid = (l: string) => JSON.parse(l).type === "speaker.centroid";
       // Positive control: the call's own log holds the centroids.
@@ -333,7 +334,9 @@ describe("attachments", () => {
     const log = Buffer.from([kept[0], centroid, kept[1], kept[2], kept[3]].join(""), "utf8");
     // A torn last line cut inside a character keeps its bytes.
     const torn = Buffer.concat([log, Buffer.from([0xc3])]);
-    expect(exportedLog(torn)).toEqual(Buffer.concat([Buffer.from(kept.join(""), "utf8"), Buffer.from([0xc3])]));
+    expect(exportedLog(torn)).toEqual(
+      Buffer.concat([Buffer.from(kept.join(""), "utf8"), Buffer.from([0xc3])]),
+    );
   });
 
   test("copy writes a real file; none leaves the audio out of the folder and the frontmatter", () => {
