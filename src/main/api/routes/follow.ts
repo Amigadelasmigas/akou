@@ -357,7 +357,7 @@ const WAIT = {
 
 const TYPES = {
   type: "string",
-  doc: "Only these log event types, comma-separated (`health,seg,answer,share.started`). The cursor still moves past the others, so a reconnect does not replay them. Default: every type.",
+  doc: "Only these log event types, comma-separated (`health,seg,answer,share.started`). The cursor still moves past the others, so a reconnect does not replay them. Default: every type. An `ak_` key never reads `speaker.centroid`, even by name: it is skipped the way a filtered type is.",
 } as const;
 
 const EPHEMERAL = {
@@ -403,7 +403,7 @@ export function followRoutes(r: Router<ApiApp>): void {
     "/calls/:id/events",
     {
       id: "calls.events",
-      doc: "The call's log events after a cursor, oldest first, each exactly once, with the next cursor. With `wait`, holds the request until an event arrives or the wait ends: a long poll. With `types`, only those events, and the wait lasts until one of them arrives; `cursor` still moves past the others.",
+      doc: "The call's log events after a cursor, oldest first, each exactly once, with the next cursor. With `wait`, holds the request until an event arrives or the wait ends: a long poll. With `types`, only those events, and the wait lasts until one of them arrives; `cursor` still moves past the others. An `ak_` key never reads `speaker.centroid` events: the cursor moves past them as past a filtered type.",
       access: "admin",
       modes: ["app"],
       params: { id: CALL_ID },
@@ -457,7 +457,7 @@ export function followRoutes(r: Router<ApiApp>): void {
     "/calls/:id/stream",
     {
       id: "calls.stream",
-      doc: "The call's log events after a cursor as server-sent events, then every new one as it is written, plus the line being spoken and the levels. A reconnecting client sends `Last-Event-ID` and resumes after it. `types` keeps only those events: one left out comes as its `id` alone, which moves `Last-Event-ID` and delivers nothing. `ephemeral=none` drops the spoken line, the levels and `read`.",
+      doc: "The call's log events after a cursor as server-sent events, then every new one as it is written, plus the line being spoken and the levels. A reconnecting client sends `Last-Event-ID` and resumes after it. `types` keeps only those events: one left out comes as its `id` alone, which moves `Last-Event-ID` and delivers nothing. `ephemeral=none` drops the spoken line, the levels and `read`. An `ak_` key never reads `speaker.centroid` events: each comes as its `id` alone, as a filtered type does.",
       access: "admin",
       modes: ["app"],
       params: { id: CALL_ID },

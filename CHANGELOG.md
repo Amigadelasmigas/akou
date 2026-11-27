@@ -5,7 +5,7 @@ All notable changes to akou. Versions follow [semantic versioning](https://semve
 ## Unreleased
 
 ### Privacy
-- **An exported call log no longer carries voice embeddings.** The copy of `events.jsonl` in the export folder dropped nothing, so it held every `speaker.centroid` event, each a speaker's voice embedding. The export now leaves those lines out and keeps every other line as it was. An `ak_` key no longer reads them from `GET /calls/{id}/events` or `GET /calls/{id}/stream` either; the app itself still does ([TRAPS](docs/TRAPS.md) VO-6).
+- **An exported call log no longer carries voice embeddings.** The copy of `events.jsonl` in the export folder dropped nothing, so it held every `speaker.centroid` event, each a speaker's voice embedding. The export now leaves those lines out and keeps every other line as it was. An `ak_` key no longer reads them from `GET /calls/{id}/events` or `GET /calls/{id}/stream` either; the app itself still does ([TRAPS](docs/TRAPS.md) VO-6). A call exported by an earlier version keeps the embeddings in its exported `events.jsonl` until it is exported again: `akou export CALL` or `POST /calls/{id}/export` rewrites that log without them.
 
 ## 1.7.6 — the mark in the Mac menu bar is as large as its neighbours
 
