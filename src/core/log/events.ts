@@ -162,6 +162,10 @@ export interface SpeakerCentroid extends Envelope {
   spk: string;
   /** base64 float32 */
   vec: string;
+  /** Seconds of speech the centroid was built from, 1 decimal. Absent in older logs. */
+  secs?: number;
+  /** How well its lines agree with their own direction, 0 to 1, 3 decimals. Absent in older logs. */
+  cons?: number;
 }
 
 export interface SpeakerMerge extends Envelope {
@@ -600,7 +604,12 @@ const SPECS: { [T in EventType]: Spec } = {
     echo: opt("boolean"),
     by: opt("author"),
   },
-  "speaker.centroid": { spk: req("string"), vec: req("string") },
+  "speaker.centroid": {
+    spk: req("string"),
+    vec: req("string"),
+    secs: opt("number"),
+    cons: opt("number"),
+  },
   "speaker.merge": { from: req("string"), into: req("string") },
   "speaker.unmerge": { from: req("string"), into: req("string") },
   "speaker.name": { spk: req("string"), name: req("string"), by: req("author") },

@@ -363,6 +363,8 @@ describe("through the host into the log", () => {
         .map((c) => c.spk)
         .sort(),
     ).toEqual(["c1", "c2"]);
+    // Through the diarizer's path too, each centroid carries the speech its line added.
+    expect(ofType(r.events, "speaker.centroid").every((c) => (c.secs ?? 0) >= 1)).toBe(true);
     expect(ofType(r.events, "speaker.merge")).toEqual([]);
   });
 

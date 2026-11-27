@@ -55,7 +55,7 @@ export const EXAMPLES: Record<string, Record<string, unknown>> = {
     lang: "en",
     model: "parakeet-tdt-0.6b-v3-fp32",
   },
-  "speaker.centroid": { spk: "c2", vec: "AAAAAA==" },
+  "speaker.centroid": { spk: "c2", vec: "AAAAAA==", secs: 214.5, cons: 0.83 },
   "speaker.merge": { from: "c3", into: "c2" },
   "speaker.unmerge": { from: "c3", into: "c2" },
   "speaker.name": { spk: "c2", name: "Ben", by: "agent:claude-code" },
@@ -180,6 +180,7 @@ describe("schema v1 (DESIGN 4.3)", () => {
       "final.done": ["languages", "warning"],
       "vocab.learned": ["heard", "lines", "kept", "vocab"],
       "speaker.voice": ["score"],
+      "speaker.centroid": ["secs", "cons"],
     };
     let checked = 0;
     for (const type of EVENT_TYPES) {
@@ -239,6 +240,19 @@ describe("schema v1 (DESIGN 4.3)", () => {
       ...done
     } = EXAMPLES["final.done"] as Record<string, unknown>;
     expect(validateEvent({ ...env, type: "final.done", ...done }).ok).toBe(true);
+  });
+
+  test("a centroid may leave out its speech and consistency, as older logs do; they are numbers", () => {
+    const centroid = EXAMPLES["speaker.centroid"] as Record<string, unknown>;
+    const { secs: _s, cons: _c, ...old } = centroid;
+    expect(validateEvent({ ...env, type: "speaker.centroid", ...old }).ok).toBe(true);
+    expect(validateEvent({ ...env, type: "speaker.centroid", ...centroid }).ok).toBe(true);
+    expect(validateEvent({ ...env, type: "speaker.centroid", ...centroid, secs: "214.5" }).ok).toBe(
+      false,
+    );
+    expect(validateEvent({ ...env, type: "speaker.centroid", ...centroid, cons: null }).ok).toBe(
+      false,
+    );
   });
 
   test("a voice name may leave out its score, and its status is one of three", () => {

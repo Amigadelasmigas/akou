@@ -9,10 +9,12 @@ import {
   cosine,
   decodeVec,
   encodeVec,
+  FIRST_MATCH_SEC,
   highestLabel,
   hungarianMax,
   LiveSpeakers,
   mapFinalToLive,
+  type SpeakerEvent,
   StreamSpeakers,
   smoothTurns,
 } from "../src/main/asr/speakers.ts";
@@ -115,6 +117,118 @@ describe("[judging] A wrong speaker merge with no way back", () => {
   });
 });
 
+describe("the speech and consistency of a cluster", () => {
+  type Centroid = Extract<SpeakerEvent, { type: "centroid" }>;
+  const only = (out: SpeakerEvent[]) => out.filter((c): c is Centroid => c.type === "centroid");
+
+  test("secs sums the embedded segments' lengths on both paths; short lines add nothing", () => {
+    const s = new LiveSpeakers();
+    s.assign(1, 0, 2.5, e(1, 0, 0));
+    s.assign(1, 3, 4.75, e(0.95, 0.05, 0));
+    // Too short to embed: it inherits c1 but adds no speech.
+    s.assign(1, 4.8, 5.4, null);
+    s.addTo("c4", e(0, 0, 1), 3.25);
+    s.addTo("c4", e(0, 0.1, 1), 1.5);
+    const out = only(s.centroids(0, true));
+    expect(out.map((c) => [c.spk, c.secs])).toEqual([
+      ["c1", 4.3],
+      ["c4", 4.8],
+    ]);
+  });
+
+  test("cons is near 1 for one voice and drops for a cluster holding two", () => {
+    const s = new LiveSpeakers();
+    // Two directions 50 degrees apart, both within 0.60 of the running centroid: one cluster.
+    s.addTo("c1", e(1, 0, 0), 2);
+    s.addTo("c1", e(0.643, 0.766, 0), 2);
+    s.addTo("c2", e(0, 0, 1), 2);
+    s.addTo("c2", e(0, 0.05, 1), 2);
+    const out = only(s.centroids(0, true));
+    const cons = Object.fromEntries(out.map((c) => [c.spk, c.cons]));
+    expect(cons.c2).toBeGreaterThan(0.99);
+    expect(cons.c1).toBeCloseTo(Math.cos((25 * Math.PI) / 180), 2);
+    expect(cons.c1 as number).toBeLessThan(cons.c2 as number);
+  });
+
+  test("the vector written and the labels are those of a cluster that keeps no voiceprint", () => {
+    const s = new LiveSpeakers();
+    const lines: [number, number, Float32Array][] = [
+      [0, 2, e(1, 0, 0)],
+      [3, 5, e(0.9, 0.1, 0)],
+      [6, 8, e(0, 1, 0)],
+      [9, 11, e(0.1, 0.9, 0.2)],
+    ];
+    const spks = lines.map(([a0, a1, v]) => s.assign(1, a0, a1, v));
+    expect(spks).toEqual(["c1", "c1", "c2", "c2"]);
+    const out = only(s.centroids(0, true));
+    const near = (got: string | undefined, want: number[]) => {
+      const vec = decodeVec(got ?? "");
+      for (let i = 0; i < want.length; i++) expect(vec[i]).toBeCloseTo(want[i] as number, 6);
+    };
+    expect(out.map((c) => decodeVec(c.vec).length)).toEqual([3, 3]);
+    near(out[0]?.vec, [0.95, 0.05, 0]);
+    near(out[1]?.vec, [0.05, 0.95, 0.1]);
+  });
+
+  test("a cluster is written once, at once, when its speech first reaches FIRST_MATCH_SEC", () => {
+    const s = new LiveSpeakers();
+    let t = 1000;
+    const step = (secs: number) => {
+      s.addTo("c1", e(1, 0, 0), secs);
+      return only(s.centroids(t++));
+    };
+    // A first write five minutes in, so the next ones are inside the interval.
+    s.addTo("c2", e(0, 1, 0), 2);
+    expect(only(s.centroids(CENTROID_EVERY_MS))).toHaveLength(1);
+    t = CENTROID_EVERY_MS + 1;
+    // The positive control: the step before the threshold writes nothing.
+    expect(step(FIRST_MATCH_SEC - 0.5)).toEqual([]);
+    const first = step(1);
+    expect(first.map((c) => [c.spk, c.secs])).toEqual([["c1", FIRST_MATCH_SEC + 0.5]]);
+    // Past the threshold, the cluster waits for the five-minute write again.
+    expect(step(5)).toEqual([]);
+    expect(step(5)).toEqual([]);
+    expect(only(s.centroids(2 * CENTROID_EVERY_MS + 2)).map((c) => c.secs)).toEqual([
+      FIRST_MATCH_SEC + 10.5,
+    ]);
+  });
+
+  test("a restored cluster keeps secs and cons from its event, and starts at 0 without them", () => {
+    const s = new LiveSpeakers();
+    s.restore({
+      centroids: [
+        { spk: "c1", vec: encodeVec(e(1, 0, 0)), secs: 30.2, cons: 0.9 },
+        { spk: "c2", vec: encodeVec(e(0, 1, 0)) },
+      ],
+    });
+    // c1 already passed FIRST_MATCH_SEC in the earlier part: no early write for it.
+    s.addTo("c1", e(1, 0, 0), 2);
+    s.addTo("c2", e(0, 1, 0), 2);
+    expect(only(s.centroids(1))).toEqual([]);
+    const out = only(s.centroids(2, true));
+    const by = Object.fromEntries(out.map((c) => [c.spk, c]));
+    expect(by.c1?.secs).toBe(32.2);
+    // Ten restored lines that agreed 0.9, and one that agrees fully.
+    expect(by.c1?.cons).toBeCloseTo((0.9 * 10 + 1) / 11, 3);
+    expect(by.c2?.secs).toBe(2);
+    expect(by.c2?.cons).toBeCloseTo(1 / 11, 3);
+  });
+
+  test("a merge adds the merged cluster's speech and an unmerge takes it back", () => {
+    const s = new LiveSpeakers();
+    s.assign(1, 0, 2, e(1, 0, 0));
+    s.assign(1, 3, 5, e(0.45, 0.89, 0));
+    for (let i = 0; i < 6; i++) s.assign(1, 6 + i * 2, 7.5 + i * 2, e(0.85, 0.53, 0));
+    expect(s.merges()).toHaveLength(1);
+    const merged = only(s.centroids(0, true)).find((c) => c.spk === "c1");
+    expect(merged?.secs).toBe(2 + 2 + 6 * 1.5);
+    s.unmerge("c2", "c1");
+    s.assign(1, 30, 32, e(1, 0, 0));
+    const back = only(s.centroids(1, true)).find((c) => c.spk === "c1");
+    expect(back?.secs).toBe(4);
+  });
+});
+
 describe("final clusters to live names", () => {
   test("the assignment is joint: each live cluster is used once, total overlap maximal", () => {
     // Greedy would give s0 -> c1 (10) and leave s1 with c2 (1); joint gives 9 + 9.
@@ -204,8 +318,8 @@ describe("labels from a stream diarizer", () => {
 
   test("addTo builds a label's centroid; nearest finds it at 0.60, never an excluded one", () => {
     const s = new LiveSpeakers();
-    s.addTo("c1", e(1, 0, 0));
-    s.addTo("c2", e(0, 1, 0));
+    s.addTo("c1", e(1, 0, 0), 2);
+    s.addTo("c2", e(0, 1, 0), 2);
     expect(s.nearest(e(0.9, 0.1, 0), new Set())).toBe("c1");
     expect(s.nearest(e(0.9, 0.1, 0), new Set(["c1"]))).toBeNull();
     // Positive control: below the join threshold nothing matches.

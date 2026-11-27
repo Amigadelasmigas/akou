@@ -61,6 +61,39 @@ describe("Accum", () => {
   });
 });
 
+describe("Accum across parts and merges", () => {
+  test("resume goes on from a written voiceprint as n lines that agreed cons", () => {
+    const a = Accum.resume(v(2, 0, 0), 30, 0.8, 10);
+    expect(a.n).toBe(10);
+    expect(a.secs).toBe(30);
+    expect(a.result()?.cons).toBeCloseTo(0.8, 6);
+    a.add(v(1, 0, 0), 2);
+    expect(a.secs).toBe(32);
+    expect(a.result()?.cons).toBeCloseTo((8 + 1) / 11, 6);
+    expect(Array.from(a.result()?.vec ?? [])).toEqual([1, 0, 0]);
+    // A zero vector or no weight keeps only the seconds.
+    const z = Accum.resume(v(0, 0), 4, 1, 10);
+    expect([z.n, z.secs, z.result()]).toEqual([0, 4, null]);
+  });
+
+  test("merge adds another accumulator as if its lines were added here; unmerge takes it back", () => {
+    const a = new Accum();
+    a.add(v(1, 0), 2);
+    const b = new Accum();
+    b.add(v(0, 1), 3);
+    a.merge(b);
+    const both = new Accum();
+    both.add(v(1, 0), 2);
+    both.add(v(0, 1), 3);
+    expect(a.result()).toEqual(both.result());
+    a.unmerge(b);
+    expect([a.n, a.secs, a.result()?.cons]).toEqual([1, 2, 1]);
+    // Sizes must match, and a refused merge changes nothing.
+    expect(() => a.merge(Accum.resume(v(1, 0, 0), 5, 1, 3))).toThrow(/size 3/);
+    expect([a.n, a.secs]).toEqual([1, 2]);
+  });
+});
+
 describe("score and unit", () => {
   test("score is null on a size mismatch, where a min-length cosine would say 1", () => {
     expect(score(v(1, 0), v(1, 0, 5))).toBeNull();

@@ -986,6 +986,10 @@ describe("speakers through the log", () => {
     r1.mgr.live()?.record({ type: "speaker.name", spk: "c1", name: "Ben", by: "user" });
     await r1.mgr.stop();
     expect(ofType(r1.events, "speaker.centroid").map((c) => c.spk)).toContain("c1");
+    // The Worker's centroid reaches the log with its speech and consistency.
+    const c1 = ofType(r1.events, "speaker.centroid").findLast((c) => c.spk === "c1");
+    expect(c1?.secs).toBeGreaterThanOrEqual(1);
+    expect(c1?.cons).toBeCloseTo(1, 3);
     await r1.asr.close();
 
     // A new app run (new manager, new Worker) restarts the call as part 2.
