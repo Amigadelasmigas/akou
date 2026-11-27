@@ -356,6 +356,34 @@ function writeAtomic(path: string, data: string | Uint8Array): void {
   }
 }
 
+/**
+ * The call's log as the export copies it ([VO-6]): every line but the `speaker.centroid` events,
+ * whose vectors are voice embeddings that never leave this computer. Every other line, a torn or
+ * unparsable one too, is kept byte for byte.
+ */
+export function exportedLog(bytes: Buffer): Buffer {
+  const kept: Buffer[] = [];
+  for (let at = 0; at < bytes.length; ) {
+    const nl = bytes.indexOf(0x0a, at);
+    const end = nl === -1 ? bytes.length : nl + 1;
+    const line = bytes.subarray(at, end);
+    if (!isCentroid(line)) kept.push(line);
+    at = end;
+  }
+  return Buffer.concat(kept);
+}
+
+function isCentroid(line: Buffer): boolean {
+  if (!line.includes("speaker.centroid")) return false;
+  try {
+    return (
+      (JSON.parse(line.toString("utf8")) as { type?: unknown } | null)?.type === "speaker.centroid"
+    );
+  } catch {
+    return false;
+  }
+}
+
 function copyAtomic(src: string, dst: string): void {
   mkdirSync(dirname(dst), { recursive: true });
   const tmp = join(dirname(dst), `.${basename(dst)}.${randomBytes(6).toString("hex")}.tmp`);
@@ -552,7 +580,7 @@ export function exportCall(o: ExportOptions): ExportResult {
   }
   // The log copy last, so it holds everything up to this export.
   const log = join(o.dir, EVENTS_FILE);
-  if (existsSync(log)) copyAtomic(log, join(attachments, EVENTS_FILE));
+  if (existsSync(log)) writeAtomic(join(attachments, EVENTS_FILE), exportedLog(readFileSync(log)));
   const digest = sha256(text);
   return {
     path: target.path,

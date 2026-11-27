@@ -26,11 +26,12 @@ const NETWORK = { "network.enabled": true, "network.bind": "127.0.0.1", "network
 let rig: AppRig;
 let net: string;
 let call: string;
-const key: Record<"read" | "jobs" | "other" | "both", string> = {
+const key: Record<"read" | "jobs" | "other" | "both" | "admin", string> = {
   read: "",
   jobs: "",
   other: "",
   both: "",
+  admin: "",
 };
 
 async function create(name: string, ...scopes: string[]): Promise<string> {
@@ -83,6 +84,7 @@ beforeAll(async () => {
   key.jobs = await create("recorder", "jobs");
   key.other = await create("other-recorder", "jobs");
   key.both = await create("phone-and-recorder", "jobs", "read");
+  key.admin = await create("laptop", "admin");
   // A call with two generated lines on it, then stopped, with a known part file to fetch.
   call = await rig.startCall({ title: "Planning" });
   await waitState(rig, call, "recording");
@@ -109,6 +111,8 @@ beforeAll(async () => {
   expect((await rig.api("POST", `/calls/${call}/pause`)).status).toBe(200);
   expect((await rig.api("POST", `/calls/${call}/resume`)).status).toBe(200);
   await line("l900002", "and write the notes after", 3, wallStart + 3000 + PAUSED_MS);
+  // A speaker's voice embedding, as the diarizer writes it: never read by a key ([VO-6]).
+  await rig.app.write(call, { type: "speaker.centroid", spk: "c1", vec: "AAAAAA==" } as never);
   expect((await rig.api("POST", `/calls/${call}/stop`)).status).toBe(200);
   await until(
     async () => (await rig.api("GET", `/calls/${call}`)).body.state === "ended",
@@ -218,6 +222,56 @@ describe("a phone reads the desktop app's history with a read key", () => {
   test("a jobs key reads no call", async () => {
     const res = await get("/calls", key.jobs);
     expect(res.status).toBe(403);
+  });
+});
+
+describe("[VO-6] an admin key reads no voice embedding", () => {
+  const isCentroid = (e: { type: string }) => e.type === "speaker.centroid";
+
+  test("GET /calls/{id}/events: the app's own token gets the centroid, an admin key every other event", async () => {
+    // Positive control: the app's own token on 127.0.0.1 reads the call's centroid.
+    const own = (await rig.api("GET", `/calls/${call}/events`)).body;
+    expect(own.events.filter(isCentroid)).toHaveLength(1);
+    const res = await get(`/calls/${call}/events`, key.admin);
+    expect(res.status).toBe(200);
+    const keyed = (await body(res)) as { events: { type: string }[]; cursor: number };
+    expect(keyed.events).toEqual(own.events.filter((e: { type: string }) => !isCentroid(e)));
+    // The cursor still moves past it, so the key's next read does not stall on it.
+    expect(keyed.cursor).toBe(own.cursor);
+    // Asking for it by name gets nothing either.
+    const named = await get(`/calls/${call}/events?types=speaker.centroid`, key.admin);
+    expect(((await body(named)) as { events: unknown[] }).events).toEqual([]);
+  });
+
+  test("GET /calls/{id}/stream: an admin key gets the centroid's id alone", async () => {
+    const own = (await rig.api("GET", `/calls/${call}/events`)).body.events as {
+      seq: number;
+      type: string;
+    }[];
+    const centroid = own.find(isCentroid);
+    const last = own.at(-1)?.seq as number;
+    expect(centroid).toBeDefined();
+    const ctl = new AbortController();
+    const res = await fetch(`${net}/calls/${call}/stream?ephemeral=none`, {
+      headers: { authorization: `Bearer ${key.admin}` },
+      signal: ctl.signal,
+    });
+    expect(res.status).toBe(200);
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    try {
+      while (!text.includes(`id: ${last}\n`)) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += dec.decode(value, { stream: true });
+      }
+    } finally {
+      ctl.abort();
+    }
+    expect(text).toContain(`id: ${centroid?.seq}\n\n`);
+    expect(text).not.toContain("speaker.centroid");
+    expect(text).toContain('"type":"seg"');
   });
 });
 
