@@ -25,12 +25,14 @@
  * - **The grid** sweeps ACCEPT, MARGIN, MIN_MATCH_SEC, MIN_LEARN_SEC and MIN_CONS with offers off;
  *   the OFFER sweep runs at the picked point.
  * - **The pick.** MIN_CONS is the lowest value that refuses every synthetic two-voice cluster
- *   (`mixed`) and keeps at least 90 % of the single-voice labels. Then, at that MIN_CONS, the
+ *   (`mixed`) and keeps at least 90 % of the single-voice labels; with no such cluster nothing is
+ *   picked (MIN_CONS, ACCEPT and OFFER are null), since no MIN_CONS was tested. Then, at it, the
  *   first point by MIN_MATCH_SEC, MIN_LEARN_SEC, ACCEPT and MARGIN, each ascending, whose
  *   wrong-name rate is at most `--max-wrong` and which names at least half the eligible known
  *   voices. With no such point ACCEPT is null: akou only offers. OFFER is the lowest value with at
  *   most 10 % wrong offers.
- * - **The positive control.** The same run with the person labels shuffled must fail the gate.
+ * - **The positive control.** The same run with the person labels shuffled must fail the gate. A
+ *   shuffle that only renames people across calls is refused and another drawn.
  *   When it passes, the data cannot tell people apart, and the script exits 1 and writes nothing.
  */
 
@@ -520,7 +522,26 @@ function pickPoint(d: Prepared, minCons: number, maxWrong: number) {
   return null;
 }
 
-/** People shuffled among the labels: one person per (call, person) key, in both sets. */
+/** Each key's person as the index of that person's first key: equal when two labelings group alike. */
+function grouping(people: readonly string[]): number[] {
+  const first = new Map<string, number>();
+  return people.map((p, i) => {
+    const n = first.get(p);
+    if (n !== undefined) return n;
+    first.set(p, i);
+    return i;
+  });
+}
+
+/** Seeds tried for a shuffle that groups the labels differently. */
+const SHUFFLE_TRIES = 1000;
+
+/**
+ * People shuffled among the labels: one person per (call, person) key, in both sets. A shuffle
+ * that only renames people (every key still grouped with the same keys) keeps who is who, so it is
+ * refused and the next seed drawn; when no shuffle can group them differently (one person, or one
+ * key per person), the last one tried stands.
+ */
 export function shuffled(
   learn: readonly VoiceLabel[],
   match: readonly VoiceLabel[],
@@ -528,18 +549,24 @@ export function shuffled(
 ): { learn: VoiceLabel[]; match: VoiceLabel[] } {
   const key = (l: VoiceLabel) => `${l.call}\u0000${l.person}`;
   const keys = [...new Set([...learn, ...match].map(key))].sort();
-  const people = keys.map((k) => k.split("\u0000")[1] as string);
-  let s = seed >>> 0;
-  const rnd = () => {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  for (let i = people.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
-    [people[i], people[j]] = [people[j] as string, people[i] as string];
+  const original = keys.map((k) => k.split("\u0000")[1] as string);
+  const was = grouping(original).join(",");
+  let people = original;
+  for (let tri = 0; tri < SHUFFLE_TRIES; tri++) {
+    people = [...original];
+    let s = (seed + tri) >>> 0;
+    const rnd = () => {
+      s = (s + 0x6d2b79f5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    for (let i = people.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [people[i], people[j]] = [people[j] as string, people[i] as string];
+    }
+    if (grouping(people).join(",") !== was) break;
   }
   const to = new Map(keys.map((k, i) => [k, people[i] as string]));
   const swap = (l: VoiceLabel) => ({ ...l, person: to.get(key(l)) as string });
@@ -566,6 +593,8 @@ function pickOnly(
   maxWrong: number,
 ) {
   const d = prepare(learnIn, matchIn);
+  // With no two-voice cluster every MIN_CONS refuses them all: nothing is measured, so none is picked.
+  if (mixed.length === 0) return { d, minCons: null, point: null };
   const minCons = minConsTable(d.match, mixed).find(
     (r) => r.mixed_refused === mixed.length && (r.single_kept ?? 0) >= MIN_SINGLE_KEPT,
   )?.min_cons;

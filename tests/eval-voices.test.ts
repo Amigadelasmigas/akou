@@ -12,6 +12,7 @@ import {
   LabelBuilder,
   type MixedLabel,
   numbersJson,
+  shuffled,
   type VoiceLabel,
 } from "../scripts/eval/voices.ts";
 import { namedLabels, voiceLabels } from "../scripts/eval-local.ts";
@@ -133,11 +134,11 @@ describe("the pick", () => {
       calls: 5,
       spread: 0.15,
     });
-    // Their two-voice clusters look like one voice, so they are left out here: MIN_CONS must not be
-    // what makes ACCEPT null.
+    // Their two-voice clusters look like one voice, so the clusters of separable people stand in:
+    // MIN_CONS must not be what makes ACCEPT null.
     expect(mixed.length).toBe(5);
-    const { result } = evaluateVoices({ learn, noGrid: true });
-    expect(result.pick.min_cons).toBe(0.5);
+    const { result } = evaluateVoices({ learn, mixed: separable().mixed, noGrid: true });
+    expect(result.pick.min_cons).toBeNumber();
     expect(result.pick.accept).toBeNull();
     expect(result.pick.margin).toBeNull();
   });
@@ -147,6 +148,16 @@ describe("the pick", () => {
     const { result } = evaluateVoices({ learn, mixed, noGrid: true });
     const top = Math.max(...mixed.flatMap((m) => [m.cons, ...(m.snaps ?? []).map((s) => s.cons)]));
     expect(result.pick.min_cons as number).toBeGreaterThan(top);
+  });
+
+  test("with no two-voice cluster nothing is picked, since no MIN_CONS was tested", () => {
+    const { learn, mixed } = separable();
+    const none = evaluateVoices({ learn, mixed: [], noGrid: true });
+    expect(none.result.pick).toMatchObject({ min_cons: null, accept: null, offer: null });
+    expect(none.result.mixed_labels).toBe(0);
+    expect(none.controlOk).toBe(true);
+    // The positive control: the same labels with their clusters pick every value.
+    expect(evaluateVoices({ learn, mixed, noGrid: true }).result.pick.min_cons).toBeNumber();
   });
 });
 
@@ -251,7 +262,7 @@ describe("the gate", () => {
       // One person in every call: shuffling changes nothing, so the gate passes shuffled too.
       const r = rng(9);
       const one = corpus({ bases: [voice(r)], calls: 4, spread: 0.1 });
-      const bad = run(one.learn, [], "one");
+      const bad = run(one.learn, [{ cons: 0.3 }], "one");
       expect(bad.code).toBe(1);
       expect(existsSync(bad.out)).toBe(false);
       // The positive control: people that differ pass, and the file is written.
@@ -263,6 +274,26 @@ describe("the gate", () => {
       for (const w of ["call0", "p0", "p3"]) expect(text).not.toContain(`"${w}"`);
     } finally {
       t.cleanup();
+    }
+  });
+
+  test("two people in four calls pass the control: a shuffle that only renames people is refused", () => {
+    for (let seed = 1; seed <= 6; seed++) {
+      const r = rng(100 + seed);
+      const data = corpus({ bases: [voice(r), voice(r)], calls: 4, spread: 0.1, seed });
+      const { result, controlOk } = evaluateVoices({ ...data, noGrid: true });
+      expect(result.pick.accept).toBeNumber();
+      expect(controlOk).toBe(true);
+    }
+    // The shuffle itself never keeps who is with whom when another grouping exists.
+    const r = rng(11);
+    const { learn } = corpus({ bases: [voice(r), voice(r)], calls: 4, spread: 0.1 });
+    for (let seed = 1; seed <= 50; seed++) {
+      const sh = shuffled(learn, learn, seed).learn;
+      const same = learn.every((a, i) =>
+        learn.every((b, j) => (a.person === b.person) === (sh[i]?.person === sh[j]?.person)),
+      );
+      expect(same).toBe(false);
     }
   });
 
@@ -311,6 +342,28 @@ describe("labels from a call's log", () => {
     // The positive control: without the second label named Ana, c1 stands.
     const only = b.events.filter((e) => !(e.type === "speaker.name" && e.spk === "c2"));
     expect(new Map(namedLabels(only)).get("c1")).toBe("ana");
+  });
+
+  test("a named label merged into another named label is dropped: the merge renamed it", () => {
+    const b = new LogBuilder();
+    b.created();
+    b.partStarted(1, T0);
+    b.seg({ id: "l000001", spk: "c1", a0: 0, a1: 4, text: "words" });
+    b.seg({ id: "l000002", spk: "c2", a0: 4, a1: 8, text: "words" });
+    b.add({ type: "speaker.name", spk: "c1", name: "Bob", by: "user" });
+    b.add({ type: "speaker.name", spk: "c2", name: "Ana", by: "user" });
+    // The positive control: before the merge both labels stand.
+    expect(new Map(namedLabels(b.events))).toEqual(
+      new Map([
+        ["c1", "bob"],
+        ["c2", "ana"],
+      ]),
+    );
+    b.add({ type: "speaker.merge", from: "c2", into: "c1" });
+    expect([...namedLabels(b.events)]).toEqual([["c1", "bob"]]);
+    // Undone, the merge no longer renames c2.
+    b.add({ type: "speaker.unmerge", from: "c2", into: "c1" });
+    expect(new Map(namedLabels(b.events)).get("c2")).toBe("ana");
   });
 
   test("a label's lines of 1 s or more are embedded from the call channel, cut at 12 s", async () => {

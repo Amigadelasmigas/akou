@@ -240,10 +240,12 @@ const TEACHERS = new Set(["user", "agent:cli"]);
 
 /**
  * The live call labels of one call that stand for a person: `c<N>` labels named by `user` or
- * `agent:cli`, less a label whose name changed later and a name given to two labels. Label to the
+ * `agent:cli`, less a label whose name changed later, a name given to two labels and a label merged
+ * into another: its lines show under the other's name, so the merge renamed it. Label to the
  * person's key (the name, trimmed and lower case).
  */
 export function namedLabels(events: readonly LogEvent[]): Map<string, string> {
+  const view = fold(events);
   const names = new Map<string, { names: Set<string>; last: string; by: string }>();
   for (const e of events) {
     if (e.type !== "speaker.name" || !/^c\d+$/.test(e.spk)) continue;
@@ -254,7 +256,9 @@ export function namedLabels(events: readonly LogEvent[]): Map<string, string> {
     n.by = e.by;
     names.set(e.spk, n);
   }
-  const kept = [...names].filter(([, n]) => n.names.size === 1 && TEACHERS.has(n.by));
+  const kept = [...names].filter(
+    ([spk, n]) => n.names.size === 1 && TEACHERS.has(n.by) && view.resolveSpeaker(spk) === spk,
+  );
   const count = new Map<string, number>();
   for (const [, n] of kept) count.set(n.last, (count.get(n.last) ?? 0) + 1);
   return new Map(
