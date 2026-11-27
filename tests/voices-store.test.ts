@@ -13,8 +13,11 @@ import {
   decodeVec,
   type Exemplar,
   encodeVec,
+  MAX_DIM,
   MAX_EXEMPLARS,
   MAX_FILE_BYTES,
+  MAX_PEOPLE,
+  type Person,
   parseVoices,
   serializeVoices,
   VoiceStore,
@@ -142,6 +145,18 @@ describe("voices store", () => {
     r.cleanup();
   });
 
+  test("an exemplar older than 3 years is refused at upsert with a plain error", async () => {
+    const r = rig();
+    await expect(r.store.upsert("Old", ex({ call: "a" }, 3 * 366 + 2))).rejects.toThrow(
+      /older than 3 years is not kept/,
+    );
+    expect(existsSync(r.path)).toBe(false);
+    // Positive control: a day inside the 3 years is kept.
+    await r.store.upsert("Old", ex({ call: "a" }, 3 * 365 - 1));
+    expect(await names(r.store)).toEqual(["Old"]);
+    r.cleanup();
+  });
+
   test("upsert is keyed by call and speaker and moves the exemplar from another person", async () => {
     const r = rig();
     await r.store.upsert("Ben", ex({ call: "a", spk: "c1" }));
@@ -229,6 +244,27 @@ describe("voices store", () => {
     r.cleanup();
   });
 
+  test("a temporary file left by a killed write is removed by the next edit and by forget all", async () => {
+    const r = rig();
+    // The pid of a process that has ended.
+    const dead = Bun.spawnSync([process.execPath, "-e", ""]).pid;
+    const stale = (pid: number) => join(r.dir, `.voices.yaml.${pid}.${crypto.randomUUID()}.tmp`);
+    await r.store.upsert("Ben", ex({ call: "a" }));
+    const held = readFileSync(r.path, "utf8");
+    writeFileSync(stale(dead), held);
+    expect(await r.store.forgetAll()).toBe(true);
+    expect(readdirSync(r.dir)).toEqual([]);
+    // Any edit sweeps them, a read included: ours and a dead process's go.
+    writeFileSync(stale(dead), held);
+    writeFileSync(stale(process.pid), held);
+    // Positive control: a write in flight in another running process keeps its file.
+    const live = stale(process.ppid);
+    writeFileSync(live, held);
+    await r.store.forget("Ben");
+    expect(readdirSync(r.dir)).toEqual([live.slice(r.dir.length + 1)]);
+    r.cleanup();
+  });
+
   test("list never carries a vector", async () => {
     const r = rig();
     await r.store.upsert("Ben", ex({ call: "a" }));
@@ -293,6 +329,36 @@ describe("voices store", () => {
     writeFileSync(r.path, `version: 1\n# ${"x".repeat(1000)}\n`);
     await r.store.upsert("Ben", ex({ call: "a" }));
     expect(await names(r.store)).toEqual(["Ben"]);
+    r.cleanup();
+  });
+
+  test("the people limit is met before the size limit, at the largest embedding", async () => {
+    const r = rig();
+    const vec = Float32Array.from({ length: MAX_DIM }, (_, i) => Math.sin(i + 1));
+    const person = (i: number): Person => ({
+      name: `${String(i).padStart(4, "0")} ${"x".repeat(95)}`,
+      exemplars: Array.from({ length: MAX_EXEMPLARS }, (_, j) =>
+        ex(
+          { call: crypto.randomUUID(), spk: `c${j + 10}`, dim: MAX_DIM, vec, secs: 1234.567, cons: 0.123456 },
+          i % 900,
+        ),
+      ),
+    });
+    const full = serializeVoices(Array.from({ length: MAX_PEOPLE }, (_, i) => person(i)));
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(MAX_FILE_BYTES);
+    writeFileSync(r.path, full);
+    // One more person is refused by the people limit, and the file is left as it was.
+    await expect(
+      r.store.upsert("New", ex({ call: "n", dim: MAX_DIM, vec })),
+    ).rejects.toThrow(`holds ${MAX_PEOPLE} people`);
+    expect(readFileSync(r.path, "utf8")).toBe(full);
+    // A known person still learns.
+    await r.store.upsert(person(0).name, ex({ call: "n", dim: MAX_DIM, vec }));
+    expect((await r.store.list()).find((p) => p.name === person(0).name)?.calls[0]).toBe("n");
+    // A larger embedding is refused.
+    await expect(
+      r.store.upsert("New", ex({ call: "m", dim: MAX_DIM + 1, vec: new Float32Array(MAX_DIM + 1).fill(1) })),
+    ).rejects.toThrow(/dim must be/);
     r.cleanup();
   });
 

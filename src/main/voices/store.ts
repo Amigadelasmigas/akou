@@ -19,13 +19,16 @@
  * ```
  *
  * - One exemplar per (call, live speaker label): naming the same label again moves it.
- * - Each person keeps the 8 newest exemplars; the file holds at most 2,000 people and 4 MB.
+ * - Each person keeps the 8 newest exemplars; the file holds at most 150 people and 4 MB. The two
+ *   limits agree: 150 people with 8 exemplars of 512 values each come to about 3.6 MB, so the people
+ *   limit is the one a user meets, with a plain error, before the size limit.
  * - An exemplar older than 3 years is dropped when the file is read, and the file is rewritten
- *   without it. There is no setting for this.
+ *   without it; one that old is never added. There is no setting for this.
  * - `load(model, dim)` returns only exemplars of the running embedder ([VO-3]): a vector of
  *   another model or size is skipped and counted, and stays in the file for that embedder.
  * - A forget rewrites the file without the entry; no tombstone keeps a vector. Forget all deletes
- *   the file.
+ *   the file. A temporary file left by a write that never finished (the app killed mid-write) is
+ *   removed by the next edit and by forget all, so no copy of a forgotten vector stays behind.
  *
  * Every write is atomic (a temporary file renamed over the old one), mode 0600, and runs under a
  * per-file lock, so two edits never lose each other's change. Every string is quoted, so a name
@@ -34,7 +37,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { norm, unit } from "../asr/voiceprint.ts";
 import { defaultConfigDir, renameReplacing } from "../vocab/files.ts";
@@ -45,10 +48,11 @@ export const VOICES_FILE = "voices.yaml";
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 /** Exemplars kept per person: the newest. */
 export const MAX_EXEMPLARS = 8;
-export const MAX_PEOPLE = 2000;
+/** People kept. At `MAX_EXEMPLARS` exemplars of `MAX_DIM` values each, they fit `MAX_FILE_BYTES`. */
+export const MAX_PEOPLE = 150;
 export const MAX_NAME_LENGTH = 100;
 /** The largest embedding size accepted; real speaker embedders give 192 to 512. */
-export const MAX_DIM = 4096;
+export const MAX_DIM = 512;
 /** An exemplar older than this is dropped. */
 export const RETENTION_YEARS = 3;
 
@@ -265,6 +269,16 @@ function capped(exemplars: readonly Exemplar[]): Exemplar[] {
   return [...exemplars].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, MAX_EXEMPLARS);
 }
 
+/** Whether a process with this id runs. EPERM means it runs as another user. */
+function running(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** Edits of one file run one at a time, in every store open on it. */
 const fileLocks = new Map<string, Promise<unknown>>();
 
@@ -339,6 +353,10 @@ export class VoiceStore {
       );
     const why = badExemplar(exemplar);
     if (why) return Promise.reject(new VoicesError(why));
+    if (Date.parse(exemplar.at) < cutoff(this.now()))
+      return Promise.reject(
+        new VoicesError(`an exemplar older than ${RETENTION_YEARS} years is not kept`),
+      );
     const ex = canonical(exemplar);
     return this.edit((all) => {
       const people = all.map((p) => ({
@@ -429,6 +447,7 @@ export class VoiceStore {
         () => false,
       );
       await rm(this.path, { force: true });
+      await this.sweepTemps();
       return existed;
     });
   }
@@ -459,6 +478,7 @@ export class VoiceStore {
    */
   private edit<T>(fn: (people: Person[]) => Edit<T>): Promise<T> {
     return locked(this.path, async () => {
+      await this.sweepTemps();
       const { people, expired } = await this.read();
       if (expired > 0)
         this.log(`${VOICES_FILE}: dropped ${expired} voiceprint(s) over 3 years old`);
@@ -466,6 +486,28 @@ export class VoiceStore {
       if (out.changed || expired > 0) await this.write(out.people);
       return out.result;
     });
+  }
+
+  /**
+   * Removes temporary files of this file left by a write that never finished: the ones of this
+   * process (none is in flight under the lock) and of a process that no longer runs. A write in
+   * flight in another running akou keeps its file.
+   */
+  private async sweepTemps(): Promise<void> {
+    const dir = dirname(this.path);
+    const prefix = `.${basename(this.path)}.`;
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const n of names) {
+      if (!n.startsWith(prefix) || !n.endsWith(".tmp")) continue;
+      const pid = Number(n.slice(prefix.length).split(".")[0]);
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && running(pid)) continue;
+      await rm(join(dir, n), { force: true });
+    }
   }
 
   private async read(): Promise<{ people: Person[]; expired: number }> {
