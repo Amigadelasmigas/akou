@@ -7,16 +7,18 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  decide,
   evaluateVoices,
   LabelBuilder,
-  type MixedLabel,
   numbersJson,
+  type Ranked,
   shuffled,
+  simulate,
   type VoiceLabel,
 } from "../scripts/eval/voices.ts";
 import { namedLabels, voiceLabels } from "../scripts/eval-local.ts";
 import { EVENTS_FILE } from "../src/core/log/writer.ts";
+import type { Candidate } from "../src/main/voices/match.ts";
+import type { VoiceThresholds } from "../src/main/voices/thresholds.ts";
 import { LogBuilder, T0, tempDir } from "./helpers.ts";
 
 const DIM = 32;
@@ -59,7 +61,7 @@ function label(
   return b.label(call, person, at) as VoiceLabel;
 }
 
-/** `people` voices, each in every one of `calls` calls, plus the two-voice clusters of each call. */
+/** `people` voices, each in every one of `calls` calls. */
 function corpus(o: {
   bases: Float32Array[];
   calls: number;
@@ -69,26 +71,14 @@ function corpus(o: {
   names?: string[];
   /** The calls' names start with it. */
   prefix?: string;
-}): { learn: VoiceLabel[]; mixed: MixedLabel[] } {
+}): { learn: VoiceLabel[] } {
   const r = rng(o.seed ?? 7);
   const learn: VoiceLabel[] = [];
-  const mixed: MixedLabel[] = [];
-  for (let c = 0; c < o.calls; c++) {
-    const perCall = o.bases.map((b) => lines(b, o.spread, r));
-    perCall.forEach((ls, i) => {
-      learn.push(label(`${o.prefix ?? "call"}${c}`, o.names?.[i] ?? `p${i}`, ls, c));
+  for (let c = 0; c < o.calls; c++)
+    o.bases.forEach((b, i) => {
+      learn.push(label(`${o.prefix ?? "call"}${c}`, o.names?.[i] ?? `p${i}`, lines(b, o.spread, r), c));
     });
-    const b = new LabelBuilder();
-    for (let k = 0; k < 20; k++) {
-      const x = perCall[0]?.[k];
-      const y = perCall[1]?.[k];
-      if (x) b.add(x.vec, x.secs);
-      if (y) b.add(y.vec, y.secs);
-    }
-    const m = b.label("", "");
-    if (m) mixed.push({ cons: m.cons, snaps: m.snaps });
-  }
-  return { learn, mixed };
+  return { learn };
 }
 
 const separable = () => {
@@ -112,52 +102,46 @@ const raw = (labels: VoiceLabel[]) =>
 
 describe("the pick", () => {
   test("separable people give a finite ACCEPT with zero wrong names", () => {
-    const { learn, mixed } = separable();
-    const { result, controlOk } = evaluateVoices({ learn, mixed });
+    const { learn } = separable();
+    const { result, controlOk } = evaluateVoices({ learn });
     expect(result.pick.accept).toBeNumber();
     expect(result.pick.wrong_name_rate).toBe(0);
     expect(result.pick.correct_name_rate as number).toBeGreaterThanOrEqual(0.5);
-    expect(result.pick.min_cons).toBeNumber();
-    expect(result.mixed_labels).toBe(5);
+    expect(result.pick_mean.accept).toBeNumber();
     expect(result.pairs.eer).toBe(0);
     expect(controlOk).toBe(true);
-    expect(result.control.shuffled_passes).toBe(0);
-    // Every grid point is there: 26 ACCEPT x 4 MARGIN x 4 x 4 x 10 MIN_CONS.
-    expect(result.grid.length).toBe(26 * 4 * 4 * 4 * 10);
+    expect(result.control).toEqual({ shuffled_passes: 0, shuffled_passes_mean: 0 });
+    expect(result.open).toBeNull();
+    // Every grid point, for both scores: 2 x 26 ACCEPT x 4 MARGIN x 4 x 4.
+    expect(result.grid.length).toBe(2 * 26 * 4 * 4 * 4);
+    expect(result.grid.filter((g) => g.mean === 1).length).toBe(26 * 4 * 4 * 4);
   });
 
   test("overlapping people give ACCEPT null (positive control of the one above)", () => {
     const r = rng(1);
     const one = voice(r);
-    const { learn, mixed } = corpus({
+    const { learn } = corpus({
       bases: [one, blend(one, voice(r), 0.02), blend(one, voice(r), 0.02), voice(r)],
       calls: 5,
       spread: 0.15,
     });
-    // Their two-voice clusters look like one voice, so the clusters of separable people stand in:
-    // MIN_CONS must not be what makes ACCEPT null.
-    expect(mixed.length).toBe(5);
-    const { result } = evaluateVoices({ learn, mixed: separable().mixed, noGrid: true });
-    expect(result.pick.min_cons).toBeNumber();
+    const { result } = evaluateVoices({ learn, noGrid: true });
     expect(result.pick.accept).toBeNull();
     expect(result.pick.margin).toBeNull();
   });
 
-  test("a two-voice cluster sets MIN_CONS above its consistency", () => {
-    const { learn, mixed } = separable();
-    const { result } = evaluateVoices({ learn, mixed, noGrid: true });
-    const top = Math.max(...mixed.flatMap((m) => [m.cons, ...(m.snaps ?? []).map((s) => s.cons)]));
-    expect(result.pick.min_cons as number).toBeGreaterThan(top);
-  });
-
-  test("with no two-voice cluster nothing is picked, since no MIN_CONS was tested", () => {
-    const { learn, mixed } = separable();
-    const none = evaluateVoices({ learn, mixed: [], noGrid: true });
-    expect(none.result.pick).toMatchObject({ min_cons: null, accept: null, offer: null });
-    expect(none.result.mixed_labels).toBe(0);
-    expect(none.controlOk).toBe(true);
-    // The positive control: the same labels with their clusters pick every value.
-    expect(evaluateVoices({ learn, mixed, noGrid: true }).result.pick.min_cons).toBeNumber();
+  test("consistency gates nothing: labels that score low on it are still learnt and named", () => {
+    const { learn } = separable();
+    const low = learn.map((l) => ({
+      ...l,
+      cons: 0.05,
+      snaps: l.snaps?.map((s) => ({ ...s, cons: 0.05 })),
+    }));
+    const a = evaluateVoices({ learn, noGrid: true }).result.pick;
+    const b = evaluateVoices({ learn: low, noGrid: true }).result.pick;
+    expect(b.accept).toBeNumber();
+    expect(b).toEqual(a);
+    expect(Object.keys(evaluateVoices({ learn, noGrid: true }).result)).not.toContain("min_cons");
   });
 });
 
@@ -170,7 +154,7 @@ describe("leave one call out and unknown voices", () => {
     alone.learn.forEach((l, i) => {
       l.person = `${l.person}${Math.floor(i / 4)}`;
     });
-    const res = evaluateVoices({ learn: alone.learn, mixed: alone.mixed });
+    const res = evaluateVoices({ learn: alone.learn });
     expect(res.result.pick.accept).toBeNull();
     expect(res.result.grid.every((g) => g.correct_name_rate === null)).toBe(true);
     // The positive control: the same voices with their names kept across calls are named.
@@ -195,53 +179,116 @@ describe("leave one call out and unknown voices", () => {
       seed: 8,
       prefix: "other",
     });
-    const learn = [...one.learn, ...two.learn];
-    const mixed = [...one.mixed, ...two.mixed];
-    const { result } = evaluateVoices({ learn, mixed });
+    const { result } = evaluateVoices({ learn: [...one.learn, ...two.learn] });
     const row = result.grid.find(
       (g) =>
         g.accept === 0.4 &&
         g.margin === 0 &&
         g.min_match_sec === 10 &&
         g.min_learn_sec === 10 &&
-        g.min_cons === 0.5,
+        g.mean === 0,
     );
     expect(row?.wrong_names_enrolled).toBe(0);
     expect(row?.wrong_names_unknown as number).toBeGreaterThan(0);
     expect(row?.wrong_names).toBe(row?.wrong_names_unknown as number);
   });
+});
 
-  test("decide gives a person to one label per call, by descending top score", () => {
-    const out = decide(
-      [
-        [
-          { person: 0, s: 0.8 },
-          { person: 1, s: 0.3 },
-        ],
-        [
-          { person: 0, s: 0.9 },
-          { person: 1, s: 0.7 },
-        ],
-      ],
-      { accept: 0.6, offer: 0.5, margin: 0.15 },
-    );
-    expect(out[1]).toMatchObject({ status: "named", person: 0 });
-    // Person 0 is taken; person 1 at 0.3 is below OFFER.
-    expect(out[0]).toMatchObject({ status: "none", person: 1 });
-    const close = decide(
-      [
-        [
-          { person: 0, s: 0.8 },
-          { person: 1, s: 0.7 },
-        ],
-      ],
-      {
-        accept: 0.6,
-        offer: 0.5,
-        margin: 0.15,
-      },
-    );
-    expect(close[0]?.status).toBe("offered");
+describe("akou's matcher in time order", () => {
+  const T: VoiceThresholds = {
+    accept: 0.6,
+    offer: 0.5,
+    margin: 0.15,
+    minMatchSec: 10,
+    minLearnSec: 10,
+    score: "best",
+  };
+  const e = (i: number) => Float32Array.from({ length: 4 }, (_, k) => (k === i ? 1 : 0));
+  const cand = (name: string, score: number, i: number): Candidate => ({
+    name,
+    score,
+    best: e(i),
+    exemplars: [e(i)],
+  });
+  const w = (t: number, ranked: Candidate[], secs = 30): Ranked => ({ t, secs, ranked });
+
+  test("the label that writes first takes the person, not the one that scores higher", () => {
+    // Label 0 writes at 10 s with Ana at 0.8; label 1 at 20 s with Ana at 0.9.
+    const first = [w(10, [cand("Ana", 0.8, 0), cand("Bo", 0.1, 1)])];
+    const later = [w(20, [cand("Ana", 0.9, 0), cand("Bo", 0.1, 1)])];
+    const out = simulate([first, later], T);
+    expect(out[0]?.final).toEqual({ name: "Ana", status: "named" });
+    expect(out[1]?.final).toBeNull();
+    // The positive control: with the times swapped label 1 takes Ana.
+    const swapped = simulate([[w(30, first[0]?.ranked ?? [])], later], T);
+    expect(swapped[1]?.final).toEqual({ name: "Ana", status: "named" });
+    expect(swapped[0]?.final).toBeNull();
+  });
+
+  test("every write is a decision: a label that drifts is withdrawn and counted", () => {
+    const writes = [
+      w(10, [cand("Ana", 0.8, 0), cand("Bo", 0.1, 1)]),
+      w(300, [cand("Bo", 0.85, 1), cand("Ana", 0.3, 0)]),
+      w(600, [cand("Ana", 0.9, 0), cand("Bo", 0.2, 1)]),
+    ];
+    const [o] = simulate([writes], T);
+    expect(o?.named).toEqual(new Set(["Ana", "Bo"]));
+    expect(o?.withdrawn).toBe(1);
+    // Ana was withdrawn from this label, so her return does not bring her back.
+    expect(o?.final).toEqual({ name: "Bo", status: "named" });
+    // The positive control: the first write alone keeps Ana.
+    expect(simulate([[writes[0] as Ranked]], T)[0]).toMatchObject({ withdrawn: 0 });
+  });
+
+  test("a write under MIN_MATCH_SEC is no decision, and people outside the labels stay taken", () => {
+    const out = simulate([[w(10, [cand("Ana", 0.9, 0)], 5)]], T);
+    expect(out[0]).toMatchObject({ eligible: false, final: null });
+    const fixed = simulate([[w(10, [cand("Ana", 0.9, 0)])]], T, new Set(["Ana"]));
+    expect(fixed[0]?.final).toBeNull();
+    // The positive control: without the fixed person, Ana is named.
+    expect(simulate([[w(10, [cand("Ana", 0.9, 0)])]], T)[0]?.final?.name).toBe("Ana");
+  });
+
+  test("a label's writes: each forced speech, each 5-minute tick it spoke before, and the end", () => {
+    const b = new LabelBuilder();
+    const r = rng(2);
+    const base = voice(r);
+    for (let k = 1; k <= 12; k++) b.add(base.map((x) => x + 0.1 * r()), 6, k * 60);
+    const snaps = (b.label("c", "p") as VoiceLabel).snaps ?? [];
+    expect(snaps.map((s) => [s.t, Math.round(s.secs), s.min ?? 0])).toEqual([
+      [120, 12, 10],
+      [240, 24, 20],
+      [300, 24, 0],
+      [300, 30, 30],
+      [600, 54, 0],
+      [600, 60, 60],
+      [720, 72, 0],
+    ]);
+  });
+});
+
+describe("the open set", () => {
+  test("labels nobody named are matched for counts only, with the call's named people left out", () => {
+    const r = rng(21);
+    const bases = [voice(r), voice(r), voice(r)];
+    const { learn } = corpus({ bases, calls: 4, spread: 0.1 });
+    const rr = rng(22);
+    // In call0: p0's voice nobody named (p0 is named there too, so it is taken), p1's voice in a
+    // call where nobody named p1, and a voice no one knows.
+    const open = [
+      label("call0", "", lines(bases[0] as Float32Array, 0.1, rr), 0),
+      label("call9", "", lines(bases[1] as Float32Array, 0.1, rr), 9),
+      label("call9", "", lines(voice(rr), 0.1, rr), 9),
+    ];
+    const { result } = evaluateVoices({ learn, open, noGrid: true });
+    expect(result.pick.accept).toBeNumber();
+    expect(result.open).toMatchObject({ clusters: 3, eligible: 3, named: 1 });
+    const h = result.open?.histogram ?? [];
+    expect(h.length).toBe(20);
+    expect(h.reduce((a, b) => a + b, 0)).toBe(3);
+    // The positive control: with p0 not named in call0, its voice is named there as well.
+    const fewer = learn.filter((l) => !(l.call === "call0" && l.person === "p0"));
+    expect(evaluateVoices({ learn: fewer, open, noGrid: true }).result.open?.named).toBe(2);
   });
 });
 
@@ -249,10 +296,10 @@ describe("the gate", () => {
   test("shuffled labels that still pass make the script exit non-zero and write nothing", () => {
     const t = tempDir("akou-eval-voices-");
     try {
-      const run = (learn: VoiceLabel[], mixed: MixedLabel[], name: string) => {
+      const run = (learn: VoiceLabel[], name: string) => {
         const file = join(t.dir, `${name}.json`);
         const out = join(t.dir, `${name}-out.json`);
-        writeFileSync(file, JSON.stringify({ learn: raw(learn), mixed }));
+        writeFileSync(file, JSON.stringify({ learn: raw(learn) }));
         const p = Bun.spawnSync([process.execPath, SCRIPT, file, "--out", out], {
           stdout: "pipe",
           stderr: "pipe",
@@ -262,12 +309,11 @@ describe("the gate", () => {
       // One person in every call: shuffling changes nothing, so the gate passes shuffled too.
       const r = rng(9);
       const one = corpus({ bases: [voice(r)], calls: 4, spread: 0.1 });
-      const bad = run(one.learn, [{ cons: 0.3 }], "one");
+      const bad = run(one.learn, "one");
       expect(bad.code).toBe(1);
       expect(existsSync(bad.out)).toBe(false);
       // The positive control: people that differ pass, and the file is written.
-      const { learn, mixed } = separable();
-      const good = run(learn, mixed, "good");
+      const good = run(separable().learn, "good");
       expect(good.code).toBe(0);
       const text = readFileSync(good.out, "utf8");
       expect(JSON.parse(text).pick.accept).toBeNumber();
@@ -298,8 +344,7 @@ describe("the gate", () => {
   });
 
   test("the output holds no string values, and the writer refuses one", () => {
-    const { learn, mixed } = separable();
-    const { result } = evaluateVoices({ learn, mixed, noGrid: true });
+    const { result } = evaluateVoices({ ...separable(), noGrid: true });
     expect(strings(result)).toEqual([]);
     expect(strings(JSON.parse(numbersJson(result)))).toEqual([]);
     expect(() => numbersJson({ a: 1, b: { c: "Ben" } })).toThrow(/numbers only/);
@@ -387,21 +432,26 @@ describe("labels from a call's log", () => {
           return Float32Array.from([1, 0, 0]);
         },
       };
-      // c1 alone is Ana: its two lines (4 s and 3.5 s); c6's half-second line is too short.
+      // c1 alone is Ana: its two lines (4 s and 3.5 s); c6's half-second line is too short. c2,
+      // now unnamed, is the open set: its 26 s line is cut at 12 s, as the live worker cuts one.
       write("c2");
       const one = await voiceLabels(t.dir, io);
       expect(one.labels.map((l) => l.person)).toEqual(["ana"]);
-      expect(cuts).toEqual([4, 3.5]);
+      expect(cuts).toEqual([4, 12, 3.5]);
       expect(one.labels[0]?.secs).toBe(7.5);
-      // c2 alone is Ana: its 26 s line is cut at 12 s, as the live worker cuts a line.
+      expect(one.open.map((l) => l.secs)).toEqual([12]);
+      // Each line is a write at its end on the call's clock.
+      expect(one.labels[0]?.snaps?.at(-1)?.t).toBe(46);
+      // c2 alone is Ana: c1 is the open set now.
       write("c1");
       cuts.length = 0;
       const two = await voiceLabels(t.dir, io);
-      expect(cuts).toEqual([12]);
-      expect(two.labels[0]?.secs).toBe(12);
+      expect(cuts).toEqual([4, 12, 3.5]);
+      expect(two.labels.map((l) => [l.person, l.secs])).toEqual([["ana", 12]]);
+      expect(two.open.map((l) => l.secs)).toEqual([7.5]);
       // A part with no audio is counted, and gives no label.
       const none = await voiceLabels(t.dir, { ...io, read: () => null });
-      expect(none).toMatchObject({ labels: [], calls: 1, skipped: 1 });
+      expect(none).toMatchObject({ labels: [], open: [], calls: 1, skipped: 1 });
     } finally {
       t.cleanup();
     }

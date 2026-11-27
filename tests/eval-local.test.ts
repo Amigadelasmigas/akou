@@ -7,7 +7,14 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluate, numbersOnly, scoreCall, withoutFixes } from "../scripts/eval-local.ts";
+import {
+  aliased,
+  evaluate,
+  nameAliases,
+  numbersOnly,
+  scoreCall,
+  withoutFixes,
+} from "../scripts/eval-local.ts";
 import type { LogEvent } from "../src/core/log/events.ts";
 import { EVENTS_FILE } from "../src/core/log/writer.ts";
 import { LogBuilder, T0 } from "./helpers.ts";
@@ -172,5 +179,36 @@ describe("evaluate and the gate", () => {
     } finally {
       rmSync(r, { recursive: true, force: true });
     }
+  });
+});
+
+describe("voice person keys", () => {
+  test("a first name used in some calls and the full name in others are one person", () => {
+    const alias = nameAliases(["ana", "ana ruiz", "bo", "lee", "lee kim", "lee park", "max"]);
+    // `ana` starts only `ana ruiz`; `lee` starts two names, so it stays its own person.
+    expect([...alias]).toEqual([["ana", "ana ruiz"]]);
+    const named = new Map([
+      ["c1", "ana"],
+      ["c2", "bo"],
+    ]);
+    expect(aliased(named, alias)).toEqual(
+      new Map([
+        ["c1", "ana ruiz"],
+        ["c2", "bo"],
+      ]),
+    );
+    // Two labels of one call that become the same person are both dropped.
+    expect(
+      aliased(
+        new Map([
+          ["c1", "ana"],
+          ["c2", "ana ruiz"],
+          ["c3", "bo"],
+        ]),
+        alias,
+      ),
+    ).toEqual(new Map([["c3", "bo"]]));
+    // The positive control: with no longer name, `ana` is kept as it is.
+    expect(nameAliases(["ana", "bo"]).size).toBe(0);
   });
 });
