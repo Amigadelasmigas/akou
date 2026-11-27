@@ -540,6 +540,30 @@ describe("the Host keeps each rule", () => {
     expect(await r.names()).toEqual({ Ben: [`${CALL}/c1`], Cy: [`${CALL}/c2`] });
   });
 
+  test("[VO-5] a merge into an unnamed label keeps the group's voice under its name; an unmerge moves it back", async () => {
+    for (const on of [true, false]) {
+      const r = rig();
+      r.speakers("c1", "c2");
+      r.add(centroid("c1", at(0), 30));
+      r.add(centroid("c2", at(5), 30));
+      r.add({ type: "speaker.name", spk: "c1", name: "Ben", by: "user" });
+      await r.settle();
+      // The positive control: before the merge, Ben holds c1's voice.
+      expect(await r.names()).toEqual({ Ben: [`${CALL}/c1`] });
+      r.enabled = on;
+      // The call has ended: no centroid comes after the merge.
+      r.add({ type: "speaker.merge", from: "c1", into: "c2" });
+      await r.settle();
+      expect(r.view.speakerLabel("c2")).toBe("Ben");
+      // Off, the merge only removes: nothing learns.
+      expect(await r.names()).toEqual(on ? { Ben: [`${CALL}/c2`] } : {});
+      r.add({ type: "speaker.unmerge", from: "c1", into: "c2" });
+      await r.settle();
+      // c2 has no name of its own again, so it keeps nothing; c1 teaches Ben once more.
+      expect(await r.names()).toEqual(on ? { Ben: [`${CALL}/c1`] } : {});
+    }
+  });
+
   test("a typed name takes its person off another label that shows it by voice, at once", async () => {
     for (const typed of ["Ben", "Bo"]) {
       const r = rig();

@@ -4,8 +4,8 @@
  *
  * - **Learn** (`learn.ts`) on each `speaker.name` and `speaker.centroid`: a label a person named
  *   keeps its latest centroid in `voices.yaml` under that name [VO-5]. A label merged into another
- *   loses its exemplar: its voice is now the group's, kept under the group's name. After an
- *   unmerge its next centroid teaches again.
+ *   loses its exemplar, and the group's root teaches the name the group now shows. An unmerge
+ *   teaches both labels again, and one left with no name that teaches loses its exemplar.
  * - **Match** (`match.ts`) on each `speaker.centroid` only: each centroid write of a label is one
  *   decision for that label, in the order the writes land, exactly as the voices evaluation
  *   (`scripts/eval/voices.ts`) drives the same function. People shown on other labels of the call
@@ -170,7 +170,12 @@ export class VoiceHost {
 
   /** Every event of every call; only names, merges and centroids do anything. */
   onEvent(call: string, e: LogEvent): void {
-    if (e.type !== "speaker.centroid" && e.type !== "speaker.name" && e.type !== "speaker.merge")
+    if (
+      e.type !== "speaker.centroid" &&
+      e.type !== "speaker.name" &&
+      e.type !== "speaker.merge" &&
+      e.type !== "speaker.unmerge"
+    )
       return;
     this.run(() => this.handle(call, e));
   }
@@ -197,40 +202,33 @@ export class VoiceHost {
     // A merged label's voice is the group's now: its exemplar goes, whatever the switch says, so
     // the group's voice is never kept under the merged label's name.
     if (e.type === "speaker.merge") {
-      if (e.from !== e.into) await this.o.store.removeExemplar(call, e.from);
+      if (e.from === e.into) return;
+      await this.o.store.removeExemplar(call, e.from);
+      // The group's root takes the name now shown for the group, which may be the merged label's.
+      if (!this.o.enabled()) return;
+      const c = this.o.call(call);
+      if (c) await this.relearn(c, call, c.view.resolveSpeaker(e.into), e.t, false);
       return;
     }
     if (!this.o.enabled()) return;
-    if (e.type !== "speaker.centroid" && e.type !== "speaker.name") return;
     const c0 = this.o.call(call);
     if (!c0) return;
+    // Both labels stand alone again: each teaches its own name, and one that teaches nothing now
+    // loses the voiceprint it kept while it was the group's root.
+    if (e.type === "speaker.unmerge") {
+      for (const spk of [e.from, e.into]) await this.relearn(c0, call, spk, e.t, true);
+      return;
+    }
+    if (e.type !== "speaker.centroid" && e.type !== "speaker.name") return;
     if (e.type === "speaker.name") this.release(c0, e.spk);
     const t = this.o.thresholds(this.model);
     const spk = e.spk;
-    let centroid: LabelCentroid | undefined;
-    if (e.type === "speaker.centroid") {
-      centroid = { vec: decodeVec(e.vec), secs: e.secs, cons: e.cons };
-    } else {
-      const s = c0.view.speakerState().centroids.find((x) => x.spk === spk);
-      centroid = s && { vec: decodeVec(s.vec), secs: s.secs, cons: s.cons };
+    if (e.type === "speaker.name") {
+      await this.relearn(c0, call, spk, e.t, false);
+      return;
     }
-    const lesson = lessonFor({
-      view: c0.view,
-      call,
-      spk,
-      model: this.model,
-      centroid,
-      minLearnSec: t.minLearnSec,
-      at: new Date(e.t).toISOString(),
-    });
-    if (lesson) {
-      try {
-        await this.o.store.upsert(lesson.name, lesson.exemplar);
-      } catch {
-        this.o.log("warn", "voices: a voiceprint was not kept in voices.yaml");
-      }
-    }
-    if (e.type !== "speaker.centroid" || !centroid) return;
+    const centroid: LabelCentroid = { vec: decodeVec(e.vec), secs: e.secs, cons: e.cons };
+    await this.teach(c0, call, spk, centroid, e.t, false);
     const secs = centroid.secs;
     if (!/^c\d+$/.test(spk) || secs === undefined || centroid.cons === undefined) return;
     if (t.minMatchSec === null || secs < t.minMatchSec) return;
@@ -271,6 +269,48 @@ export class VoiceHost {
         by: "app",
       });
       return;
+    }
+  }
+
+  /** Teaches what `spk` teaches now from the fold's latest centroid of it. */
+  private relearn(
+    c: VoiceCall,
+    call: string,
+    spk: string,
+    t: number,
+    drop: boolean,
+  ): Promise<void> {
+    const s = c.view.speakerState().centroids.find((x) => x.spk === spk);
+    const centroid = s && { vec: decodeVec(s.vec), secs: s.secs, cons: s.cons };
+    return this.teach(c, call, spk, centroid, t, drop);
+  }
+
+  /**
+   * Keeps `spk`'s voiceprint under its name when the learn rule says so. With `drop`, a label that
+   * teaches nothing loses the voiceprint it held.
+   */
+  private async teach(
+    c: VoiceCall,
+    call: string,
+    spk: string,
+    centroid: LabelCentroid | undefined,
+    t: number,
+    drop: boolean,
+  ): Promise<void> {
+    const lesson = lessonFor({
+      view: c.view,
+      call,
+      spk,
+      model: this.model,
+      centroid,
+      minLearnSec: this.o.thresholds(this.model).minLearnSec,
+      at: new Date(t).toISOString(),
+    });
+    try {
+      if (lesson) await this.o.store.upsert(lesson.name, lesson.exemplar);
+      else if (drop) await this.o.store.removeExemplar(call, spk);
+    } catch {
+      this.o.log("warn", "voices: a voiceprint was not kept in voices.yaml");
     }
   }
 
