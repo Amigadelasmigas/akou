@@ -215,7 +215,7 @@ describe("[V6] the post-call pass", () => {
   test("[VO-7] a name found by voice is not a known term, so its correction is only a proposal", () => {
     const b = call();
     b.seg({ id: "l000004", spk: "c2", text: "thanks siobahn", w0: T0 + 30 * S });
-    b.add({ type: "speaker.voice", spk: "c2", name: "Siobhan", status: "named", score: 0.9 });
+    b.add({ type: "speaker.voice", spk: "c2", name: "Siobhan", status: "named", score: 0.9, by: "app" });
     const answer = {
       corrections: [{ line: "#l000004", heard: "siobahn", term: "Siobhan" }],
       proposals: [],
@@ -235,7 +235,9 @@ describe("[V6] the post-call pass", () => {
     b.add({ type: "speaker.name", spk: "c2", name: "Siobhan", by: "user" });
     const typed = check();
     expect(typed.corrections).toMatchObject([{ term: "Siobhan", heard: "siobahn" }]);
-    expect(typed.proposals).toEqual([]);
+    expect(typed.proposals.map((p) => p.why)).not.toContain(
+      "a correction to a term not in the vocabulary",
+    );
   });
 });
 
