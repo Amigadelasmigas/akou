@@ -23,11 +23,13 @@
  * - **Voices**, with `--voices` (TS-21b): whether a named voice is recognised in your other calls.
  *   A label is a live `c<N>` speaker that you named, or the CLI did (`user`, `agent:cli`). A name
  *   on two labels of one call, and a label whose name changed later, are dropped as likely merges
- *   or splits. Each label's call lines of 1 s or more are embedded again from the part audio (the
- *   call channel, cut at 12 s as the live worker cuts them) with the speaker model, TitaNet small
- *   unless `--model` names another, and scored by `scripts/eval/voices.ts`. Every pair of labels
- *   of one call, their lines interleaved, is a synthetic two-voice cluster for MIN_CONS. Needs
- *   ffmpeg.
+ *   or splits. A person is their name, trimmed and in lower case; a name of fewer words that
+ *   starts the only longer name it starts (`ana` and `ana ruiz`) is that person too. Each label's
+ *   call lines of 1 s or more are embedded again from the part audio (the call channel, cut at
+ *   12 s as the live worker cuts them, each placed at its end on the call's clock) with the
+ *   speaker model, TitaNet small unless `--model` names another, and scored by
+ *   `scripts/eval/voices.ts`. Every live `c<N>` speaker nobody named is embedded the same way and
+ *   matched as the open set: only how many were named or offered is written. Needs ffmpeg.
  *
  * The result is checked before it is written: every value must be a number (or null where nothing
  * was scored), so a string, and with it any text of a call, makes the script refuse and write
@@ -53,7 +55,6 @@ import {
   LabelBuilder,
   MAX_CHUNK_SECONDS,
   MIN_CHUNK_SECONDS,
-  type MixedLabel,
   openEmbedder,
   type VoiceLabel,
   voiceModelPath,
@@ -307,29 +308,82 @@ export interface VoiceReaders {
   read(dir: string, part: number): Float32Array | null;
 }
 
-/** The labels and the synthetic two-voice clusters of every call under `root`. */
+/**
+ * The person each key stands for when a shorter name is the start of exactly one longer name: a
+ * first name used in some calls and the full name in others are one person. Keys with no such
+ * longer name are left out.
+ */
+export function nameAliases(keys: Iterable<string>): Map<string, string> {
+  const all = [...new Set(keys)];
+  const words = (k: string) => k.split(/\s+/).filter(Boolean);
+  const out = new Map<string, string>();
+  for (const k of all) {
+    const w = words(k);
+    const longer = all.filter((o) => {
+      const x = words(o);
+      return x.length > w.length && w.every((t, i) => t === x[i]);
+    });
+    if (longer.length === 1) out.set(k, longer[0] as string);
+  }
+  return out;
+}
+
+/** `named` with each key replaced by its alias, less any person now on two labels of the call. */
+export function aliased(
+  named: ReadonlyMap<string, string>,
+  alias: ReadonlyMap<string, string>,
+): Map<string, string> {
+  const to = new Map([...named].map(([spk, k]) => [spk, alias.get(k) ?? k]));
+  const count = new Map<string, number>();
+  for (const k of to.values()) count.set(k, (count.get(k) ?? 0) + 1);
+  return new Map([...to].filter(([, k]) => count.get(k) === 1));
+}
+
+/** The live `c<N>` speakers of a call that nobody named and that no merge folded into another. */
+export function unnamedLabels(events: readonly LogEvent[]): Set<string> {
+  const view = fold(events);
+  const named = new Set(
+    events.filter((e) => e.type === "speaker.name").map((e) => (e as { spk: string }).spk),
+  );
+  const out = new Set<string>();
+  for (const e of events) {
+    const spk = e.type === "seg" ? e.spk : undefined;
+    if (spk && /^c\d+$/.test(spk) && !named.has(spk) && view.resolveSpeaker(spk) === spk)
+      out.add(spk);
+  }
+  return out;
+}
+
+/** The named labels and the open set (labels nobody named) of every call under `root`. */
 export async function voiceLabels(
   root: string,
   io: VoiceReaders,
-): Promise<{ labels: VoiceLabel[]; mixed: MixedLabel[]; calls: number; skipped: number }> {
+): Promise<{ labels: VoiceLabel[]; open: VoiceLabel[]; calls: number; skipped: number }> {
   const labels: VoiceLabel[] = [];
-  const mixed: MixedLabel[] = [];
+  const open: VoiceLabel[] = [];
   let calls = 0;
   let skipped = 0;
-  for (const { dir } of listCallDirs(root)) {
-    const { events } = await readLog(join(dir, EVENTS_FILE));
-    const named = namedLabels(events);
-    if (named.size === 0) continue;
-    calls++;
+  const logs: { dir: string; events: LogEvent[] }[] = [];
+  for (const { dir } of listCallDirs(root))
+    logs.push({ dir, events: (await readLog(join(dir, EVENTS_FILE))).events });
+  const alias = nameAliases(logs.flatMap(({ events }) => [...namedLabels(events).values()]));
+  for (const { dir, events } of logs) {
+    const named = aliased(namedLabels(events), alias);
+    const unnamed = unnamedLabels(events);
+    if (named.size === 0 && unnamed.size === 0) continue;
+    if (named.size > 0) calls++;
     const view = fold(events);
+    const parts = view.parts();
+    const t0 = parts[0]?.wallStart ?? 0;
+    const offset = new Map(parts.map((p) => [p.part, (p.wallStart - t0) / 1000]));
     const ids = [...new Set(events.filter((e) => e.type === "seg").map((e) => e.id))];
     const audio = new Map<number, Float32Array | null>();
-    const lines = new Map<string, { vec: Float32Array; secs: number }[]>();
+    const lines = new Map<string, { vec: Float32Array; secs: number; t: number }[]>();
     let missing = false;
     for (const id of ids) {
       const s = view.segment(id);
       if (s?.layer !== "live" || s.ch !== "call" || s.text === null || s.echo) continue;
-      if (!named.has(s.spk) || s.a1 - s.a0 < MIN_CHUNK_SECONDS) continue;
+      if (!(named.has(s.spk) || unnamed.has(s.spk)) || s.a1 - s.a0 < MIN_CHUNK_SECONDS) continue;
       if (!audio.has(s.part)) audio.set(s.part, io.read(dir, s.part));
       const samples = audio.get(s.part);
       if (!samples) {
@@ -340,39 +394,25 @@ export async function voiceLabels(
       const cut = samples.subarray(Math.round(s.a0 * ASR_RATE), Math.round(end * ASR_RATE));
       if (cut.length < MIN_CHUNK_SECONDS * ASR_RATE) continue;
       const list = lines.get(s.spk) ?? [];
-      list.push({ vec: io.embed(cut), secs: end - s.a0 });
+      list.push({ vec: io.embed(cut), secs: end - s.a0, t: (offset.get(s.part) ?? 0) + end });
       lines.set(s.spk, list);
     }
     if (missing) skipped++;
-    const at = view.parts()[0]?.wallStart ?? calls;
-    const spks = [...lines.keys()].sort();
-    for (const spk of spks) {
+    const at = parts[0]?.wallStart ?? calls;
+    for (const spk of [...lines.keys()].sort()) {
       const b = new LabelBuilder();
-      for (const l of lines.get(spk) ?? []) b.add(l.vec, l.secs);
-      const label = b.label(dir, named.get(spk) as string, at);
-      if (label) labels.push(label);
+      for (const l of (lines.get(spk) ?? []).sort((x, y) => x.t - y.t)) b.add(l.vec, l.secs, l.t);
+      const person = named.get(spk);
+      const label = b.label(dir, person ?? "", at);
+      if (label) (person === undefined ? open : labels).push(label);
     }
-    for (let i = 0; i < spks.length; i++)
-      for (let j = i + 1; j < spks.length; j++) {
-        const a = lines.get(spks[i] as string) ?? [];
-        const c = lines.get(spks[j] as string) ?? [];
-        const b = new LabelBuilder();
-        for (let k = 0; k < Math.max(a.length, c.length); k++) {
-          const x = a[k];
-          const y = c[k];
-          if (x) b.add(x.vec, x.secs);
-          if (y) b.add(y.vec, y.secs);
-        }
-        const m = b.label("", "");
-        if (m) mixed.push({ cons: m.cons, snaps: m.snaps });
-      }
   }
-  return { labels, mixed, calls, skipped };
+  return { labels, open, calls, skipped };
 }
 
 async function voicesMain(root: string, flag: (n: string) => string | undefined): Promise<number> {
   const embed = openEmbedder(voiceModelPath(flag("--model"), flag("--models")));
-  const { labels, mixed, calls, skipped } = await voiceLabels(root, {
+  const { labels, open, calls, skipped } = await voiceLabels(root, {
     embed,
     read: readCallChannel,
   });
@@ -384,7 +424,7 @@ async function voicesMain(root: string, flag: (n: string) => string | undefined)
   const out =
     flag("--out") ?? join(import.meta.dir, "..", "docs", "gates", `voices-local-${day}.json`);
   mkdirSync(dirname(out), { recursive: true });
-  const run = evaluateVoices({ learn: labels, mixed, maxWrong: 0 });
+  const run = evaluateVoices({ learn: labels, open, maxWrong: 0 });
   return finish(
     { ...run, result: { ...run.result, calls_read: calls, calls_without_audio: skipped } },
     out,

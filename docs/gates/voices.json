@@ -1,9 +1,18 @@
 {
-  "schema": "The voice thresholds akou ships, measured by scripts/eval-local.ts --voices and scripts/eval/voices-ami.ts (docs/TESTING.md TS-21b). Numbers only. accept null: akou only offers a name by voice; offer null too: it does nothing by voice. Scores are cosines of unit-length voiceprints; seconds are speech in the label.",
-  "accept": null,
-  "offer": null,
-  "margin": null,
-  "min_match_sec": null,
-  "min_learn_sec": null,
-  "min_cons": null
+  "titanet-small": {
+    "accept": null,
+    "offer": null,
+    "margin": null,
+    "minMatchSec": null,
+    "minLearnSec": null,
+    "score": "best"
+  },
+  "campplus-zh-en-advanced": {
+    "accept": null,
+    "offer": null,
+    "margin": null,
+    "minMatchSec": null,
+    "minLearnSec": null,
+    "score": "best"
+  }
 }
