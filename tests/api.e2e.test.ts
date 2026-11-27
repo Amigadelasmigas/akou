@@ -728,6 +728,8 @@ describe("settings over the API", () => {
         // SV-C2: an unauthenticated door opens from the file or the environment only.
         "server.wyoming",
         "server.wyoming_port",
+        // Whether akou keeps voiceprints is set in the window or the file only.
+        "voices.enabled",
         "webhook.url",
       ].sort(),
     );

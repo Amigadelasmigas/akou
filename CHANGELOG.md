@@ -4,6 +4,9 @@ All notable changes to akou. Versions follow [semantic versioning](https://semve
 
 ## Unreleased
 
+### Speakers
+- **Settings has a Speakers section, with "Recognise voices across calls" (`voices.enabled`, on by default).** It is the switch for the local voices file, `voices.yaml` in the config folder: a voiceprint per call speaker you name, at most 8 per person and 150 people, written at mode 0600 and never sent. An exemplar older than 3 years is dropped, and forgetting a voice leaves no copy of it behind, not even from a write cut short. Only the window or the config file sets the switch; the API, an `ak_` key and server mode cannot. Nothing learns or matches voices yet.
+
 ### Privacy
 - **An exported call log no longer carries voice embeddings.** The copy of `events.jsonl` in the export folder dropped nothing, so it held every `speaker.centroid` event, each a speaker's voice embedding. The export now leaves those lines out and keeps every other line as it was. An `ak_` key no longer reads them from `GET /calls/{id}/events` or `GET /calls/{id}/stream` either; the app itself still does ([TRAPS](docs/TRAPS.md) VO-6). A call exported by an earlier version keeps the embeddings in its exported `events.jsonl` until it is exported again: `akou export CALL` or `POST /calls/{id}/export` rewrites that log without them.
 
