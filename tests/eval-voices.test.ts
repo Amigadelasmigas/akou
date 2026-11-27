@@ -10,13 +10,16 @@ import {
   evaluateVoices,
   LabelBuilder,
   numbersJson,
+  pickOffer,
   type Ranked,
   shuffled,
   simulate,
+  type Tally,
   type VoiceLabel,
 } from "../scripts/eval/voices.ts";
 import { namedLabels, voiceLabels } from "../scripts/eval-local.ts";
 import { EVENTS_FILE } from "../src/core/log/writer.ts";
+import { FIRST_MATCH_SEC, LiveSpeakers } from "../src/main/asr/speakers.ts";
 import type { Candidate } from "../src/main/voices/match.ts";
 import type { VoiceThresholds } from "../src/main/voices/thresholds.ts";
 import { LogBuilder, T0, tempDir } from "./helpers.ts";
@@ -145,6 +148,33 @@ describe("the pick", () => {
     expect(b).toEqual(a);
     expect(Object.keys(evaluateVoices({ learn, noGrid: true }).result)).not.toContain("min_cons");
   });
+
+  test("an OFFER that names anyone wrongly is refused, however few of its offers are wrong", () => {
+    // 200 labels, 100 offers with 1 wrong (1 %): the wrong-offer rate passes. At 0.6 one label is
+    // wrongly named, as offers take people from the other labels of a call.
+    const n = (wrongKnown: number): Tally => ({
+      eligibleKnown: 200,
+      correct: 150,
+      eligible: 200,
+      wrongKnown,
+      wrongEnrolled: wrongKnown,
+      eligibleUnknown: 0,
+      wrongUnknown: 0,
+      offers: 100,
+      wrongOffers: 1,
+      withdrawals: 0,
+    });
+    const sweep = [
+      { offer: 0.6, n: n(1) },
+      { offer: 0.62, n: n(0) },
+    ];
+    expect(pickOffer(sweep, 0)?.offer).toBe(0.62);
+    expect(pickOffer(sweep.slice(0, 1), 0)).toBeNull();
+    // The positive control: the same offers with no wrong name, or a gate that allows 1 in 200,
+    // take the lowest value.
+    expect(pickOffer([{ offer: 0.6, n: n(0) }], 0)?.offer).toBe(0.6);
+    expect(pickOffer(sweep, 0.005)?.offer).toBe(0.6);
+  });
 });
 
 describe("leave one call out and unknown voices", () => {
@@ -242,16 +272,37 @@ describe("akou's matcher in time order", () => {
     expect(simulate([[writes[0] as Ranked]], T)[0]).toMatchObject({ withdrawn: 0 });
   });
 
+  test("an offer takes its person from a later label, which can then be named wrongly", () => {
+    const t: VoiceThresholds = { ...T, accept: 0.8, offer: null, margin: 0.1 };
+    // L1 (really Bo) writes at 10 s: Ana 0.65, Bo 0.5. L2 (really Ana) at 20 s: Ana 0.95, Cy 0.84.
+    const l1 = [w(10, [cand("Ana", 0.65, 0), cand("Bo", 0.5, 1)])];
+    const l2 = [w(20, [cand("Ana", 0.95, 0), cand("Cy", 0.84, 2)])];
+    const named = (o: ReturnType<typeof simulate>) => o.map((x) => [...x.named]);
+    expect(named(simulate([l1, l2], t))).toEqual([[], ["Ana"]]);
+    // Offers on: L1's wrong offer takes Ana, and L2 is named Cy. The OFFER pick must count this.
+    expect(named(simulate([l1, l2], { ...t, offer: 0.6 }))).toEqual([[], ["Cy"]]);
+    // The positive control: L1 far from Ana offers nobody, and L2 is still Ana.
+    const far = [w(10, [cand("Ana", 0.3, 0), cand("Bo", 0.5, 1)])];
+    expect(named(simulate([far, l2], { ...t, offer: 0.6 }))).toEqual([[], ["Ana"]]);
+  });
+
   test("a write under MIN_MATCH_SEC is no decision, and people outside the labels stay taken", () => {
     const out = simulate([[w(10, [cand("Ana", 0.9, 0)], 5)]], T);
     expect(out[0]).toMatchObject({ eligible: false, final: null });
+    // A forced write at another speech than the worker's (an older labels file) is none either.
+    const at30 = { ...T, minMatchSec: 30 };
+    const old = { ...w(10, [cand("Ana", 0.9, 0)], 30), min: 30 };
+    expect(simulate([[old]], at30)[0]).toMatchObject({ eligible: false, final: null });
+    expect(simulate([[{ ...old, min: FIRST_MATCH_SEC }]], at30)[0]).toMatchObject({
+      eligible: true,
+    });
     const fixed = simulate([[w(10, [cand("Ana", 0.9, 0)])]], T, new Set(["Ana"]));
     expect(fixed[0]?.final).toBeNull();
     // The positive control: without the fixed person, Ana is named.
     expect(simulate([[w(10, [cand("Ana", 0.9, 0)])]], T)[0]?.final?.name).toBe("Ana");
   });
 
-  test("a label's writes: each forced speech, each 5-minute tick it spoke before, and the end", () => {
+  test("a label's writes: the forced one, each 5-minute tick it spoke before, and the end", () => {
     const b = new LabelBuilder();
     const r = rng(2);
     const base = voice(r);
@@ -263,14 +314,33 @@ describe("akou's matcher in time order", () => {
       );
     const snaps = (b.label("c", "p") as VoiceLabel).snaps ?? [];
     expect(snaps.map((s) => [s.t, Math.round(s.secs), s.min ?? 0])).toEqual([
-      [120, 12, 10],
-      [240, 24, 20],
+      [240, 24, FIRST_MATCH_SEC],
       [300, 24, 0],
-      [300, 30, 30],
       [600, 54, 0],
-      [600, 60, 60],
       [720, 72, 0],
     ]);
+  });
+
+  test("the forced write is the live worker's: one, when the speech first reaches FIRST_MATCH_SEC", () => {
+    const r = rng(4);
+    const base = voice(r);
+    for (const secs of [3, 4.5, 7]) {
+      const live = new LiveSpeakers();
+      const b = new LabelBuilder();
+      const worker: number[] = [];
+      // Every line inside the first five minutes, so the worker writes only the forced one.
+      for (let k = 1; k <= 20; k++) {
+        const v = base.map((x) => x + 0.1 * r());
+        live.addTo("c1", v, secs);
+        for (const c of live.centroids(k * 10_000)) if (c.type === "centroid") worker.push(c.secs);
+        b.add(v, secs, k * 10);
+      }
+      const forced = ((b.label("c", "p") as VoiceLabel).snaps ?? [])
+        .filter((s) => s.min !== undefined)
+        .map((s) => Math.round(s.secs * 10) / 10);
+      expect(worker).toHaveLength(1);
+      expect(forced).toEqual(worker);
+    }
   });
 });
 
@@ -348,6 +418,37 @@ describe("the gate", () => {
       );
       expect(same).toBe(false);
     }
+  });
+
+  test("the shuffled control runs at the picked point, not over the whole grid", () => {
+    const r = rng(31);
+    const a = voice(r);
+    const b = voice(r);
+    const build = (short: ReadonlySet<string>) => {
+      const rr = rng(32);
+      const make = (call: string, person: string, base: Float32Array, at: number) => {
+        const ls = lines(base, 0.1, rr);
+        // A short label: 24 s, under MIN_MATCH_SEC and MIN_LEARN_SEC 30.
+        return label(call, person, short.has(`${call}/${person}`) ? ls.slice(0, 4) : ls, at);
+      };
+      const out = [make("call0", "p1", b, 0)];
+      for (let c = 0; c < 6; c++) out.push(make(`call${c}`, "p0", a, c));
+      return out;
+    };
+    // The shuffle reads only the (call, person) keys, so one dry run says where p1 lands.
+    const dry = build(new Set());
+    const sh = shuffled(dry, dry).learn;
+    const moved = dry.find((l, i) => l.person === "p0" && sh[i]?.person === "p1") as VoiceLabel;
+    // The two labels the shuffle swaps are short; every other label is 120 s of p0's voice.
+    const learn = build(new Set(["call0/p1", `${moved.call}/p0`]));
+    const { result, controlOk } = evaluateVoices({ learn, noGrid: true });
+    expect(result.pick).toMatchObject({ min_match_sec: 10, min_learn_sec: 10, wrong_name_rate: 0 });
+    // Shuffled, the labels pass at a point that leaves the short ones out...
+    const whole = evaluateVoices({ learn: shuffled(learn, learn).learn, noGrid: true }).result;
+    expect(whole.pick.min_match_sec as number).toBeGreaterThanOrEqual(30);
+    // ...but not at the picked point, where the control runs: it holds.
+    expect(controlOk).toBe(true);
+    expect(result.control).toEqual({ shuffled_passes: 0, shuffled_passes_mean: 0 });
   });
 
   test("the output holds no string values, and the writer refuses one", () => {

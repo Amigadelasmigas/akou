@@ -17,9 +17,9 @@
  * - **The learn rule.** A label becomes an exemplar of its person when `secs >= MIN_LEARN_SEC`.
  *   Each person keeps the `KEEP` newest (by `at`). `cons` is recorded and never gates anything.
  * - **The writes.** A label's voiceprint is matched at each centroid write the live worker makes:
- *   when its speech first reaches MIN_MATCH_SEC (and `FIRST_MATCH_SEC`), at each 5-minute tick of
- *   the call clock it spoke in since the last one, and at the end. Labels without snaps have one
- *   write, their full voiceprint.
+ *   when its speech first reaches `FIRST_MATCH_SEC`, at each 5-minute tick of the call clock it
+ *   spoke in since the last one, and at the end. MIN_MATCH_SEC only skips the writes under it, as
+ *   the matcher does. Labels without snaps have one write, their full voiceprint.
  * - **The match rule** is akou's own, `src/main/voices/match.ts`: every write of a call, in time
  *   order, is one decision for its label, with the people other labels show left out and a name
  *   withdrawn when the voice moves away from it. A label counts as wrongly named when any write
@@ -33,7 +33,9 @@
  * - **The pick.** The first point by MIN_MATCH_SEC, MIN_LEARN_SEC, ACCEPT and MARGIN, each
  *   ascending, whose wrong-name rate is at most `--max-wrong` and which names at least half the
  *   eligible known voices. With no such point ACCEPT is null: akou only offers. OFFER is the
- *   lowest value with at most 10 % wrong offers.
+ *   lowest value with at most 10 % wrong offers whose wrong-name rate, offers on, is still at
+ *   most `--max-wrong`: an offer takes its person from the other labels of the call, so it can
+ *   change who they are named as.
  * - **The open set** (`open`): labels nobody named (no truth exists for them) are matched against
  *   the store learnt from every named label, at the picked point, with the people named in their
  *   call left out. Only counts and a histogram of their top scores are written.
@@ -76,8 +78,6 @@ export const MIN_NAMED = 0.5;
 export const MAX_WRONG_OFFERS = 0.1;
 /** The live worker's periodic centroid write, seconds of call clock. */
 export const WRITE_EVERY_SEC = CENTROID_EVERY_MS / 1000;
-/** The speech at which a label gets a write of its own: every grid MIN_MATCH_SEC and the worker's. */
-const FORCED = [...new Set([...GRID.minMatchSec, FIRST_MATCH_SEC])].sort((a, b) => a - b);
 /** Bins of the open set's top-score histogram, over 0 to 1. */
 export const HISTOGRAM_BINS = 20;
 
@@ -89,7 +89,7 @@ export interface Snap {
   secs: number;
   vec: Float32Array;
   cons: number;
-  /** Set on a write forced when the speech first reached this many seconds. */
+  /** Set on the write forced when the speech first reached this many seconds, `FIRST_MATCH_SEC`. */
   min?: number;
 }
 
@@ -110,13 +110,13 @@ export interface VoiceLabel {
 
 /**
  * Builds one label from its lines in time order, recording a write where the live worker makes
- * one: when the speech first reaches each forced value, at each periodic tick it spoke before, and
+ * one: when the speech first reaches `FIRST_MATCH_SEC`, at each periodic tick it spoke before, and
  * at the end.
  */
 export class LabelBuilder {
   private readonly acc = new Accum();
   private readonly snaps: Snap[] = [];
-  private readonly forced = new Set<number>();
+  private forced = false;
   private last = 0;
   private dirty = false;
 
@@ -128,10 +128,9 @@ export class LabelBuilder {
     if (!this.acc.add(vec, secs)) return;
     this.last = time;
     this.dirty = true;
-    for (const min of FORCED) {
-      if (this.acc.secs < min || this.forced.has(min)) continue;
-      this.forced.add(min);
-      this.snap(time, min);
+    if (!this.forced && this.acc.secs >= FIRST_MATCH_SEC) {
+      this.forced = true;
+      this.snap(time, FIRST_MATCH_SEC);
     }
   }
 
@@ -216,12 +215,13 @@ export interface Ranked {
   ranked: Candidate[];
 }
 
-/** The writes of a label at `minMatch`: its forced one at that speech, the worker's, the rest. */
+/**
+ * The writes of a label the matcher decides at `minMatch`: the worker's, at or over that speech.
+ * A forced write at another speech (from an older labels file) is not one the worker makes.
+ */
 function writesAt(snaps: readonly Ranked[], minMatch: number): Ranked[] {
   return snaps.filter(
-    (s) =>
-      s.secs >= minMatch &&
-      (s.min === undefined || s.min === minMatch || s.min === FIRST_MATCH_SEC),
+    (s) => s.secs >= minMatch && (s.min === undefined || s.min === FIRST_MATCH_SEC),
   );
 }
 
@@ -393,7 +393,7 @@ function rankCases(d: Prepared, minLearn: number, mode: ScoreMode) {
   return out;
 }
 
-interface Tally {
+export interface Tally {
   /** Known pass: eligible labels whose person is in the store, and of them, named right. */
   eligibleKnown: number;
   correct: number;
@@ -476,7 +476,7 @@ function tally(d: Prepared, s: Setting): Tally {
 
 const rate = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 10000) / 10000 : null);
 
-function wrongRate(n: Tally): number {
+export function wrongRate(n: Tally): number {
   return rate(n.wrongKnown + n.wrongUnknown, n.eligible + n.eligibleUnknown) ?? 0;
 }
 
@@ -631,12 +631,24 @@ function pickPoint(d: Prepared, mode: ScoreMode, maxWrong: number): Point | null
   return null;
 }
 
+/**
+ * The OFFER of a pick from its sweep, lowest first: the first value with offers, at most
+ * `MAX_WRONG_OFFERS` of them wrong, and a wrong-name rate still at most `maxWrong`, or null.
+ */
+export function pickOffer<R extends { n: Tally }>(sweep: readonly R[], maxWrong: number): R | null {
+  return (
+    sweep.find(
+      ({ n }) =>
+        n.offers > 0 && n.wrongOffers / n.offers <= MAX_WRONG_OFFERS && wrongRate(n) <= maxWrong,
+    ) ?? null
+  );
+}
+
 /** The pick for one score mode, with its OFFER sweep. */
 function pickFor(d: Prepared, mode: ScoreMode, maxWrong: number) {
   const point = pickPoint(d, mode, maxWrong);
   const offers: OfferRow[] = [];
-  let offer: number | null = null;
-  let chosen: Tally | null = point?.n ?? null;
+  const sweep: { offer: number; n: Tally }[] = [];
   const minMatch = point?.minMatch ?? (GRID.minMatchSec[0] as number);
   const minLearn = point?.minLearn ?? (GRID.minLearnSec[0] as number);
   for (const o of GRID.offer) {
@@ -656,11 +668,11 @@ function pickFor(d: Prepared, mode: ScoreMode, maxWrong: number) {
       offer_rate: rate(n.offers, n.eligible + n.eligibleUnknown),
       wrong_offer_rate: rate(n.wrongOffers, n.offers),
     });
-    if (offer === null && n.offers > 0 && n.wrongOffers / n.offers <= MAX_WRONG_OFFERS) {
-      offer = o;
-      if (point) chosen = n;
-    }
+    sweep.push({ offer: o, n });
   }
+  const got = pickOffer(sweep, maxWrong);
+  const offer = got?.offer ?? null;
+  const chosen: Tally | null = point ? (got?.n ?? point.n) : null;
   const row = offers.find((r) => r.offer === offer);
   const pick: Pick = {
     accept: point?.accept ?? null,

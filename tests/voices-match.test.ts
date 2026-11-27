@@ -217,6 +217,16 @@ describe("traps", () => {
       name: "Ana",
       next: { kind: "none" },
     });
+    // Another person now named while Ana still scores over OFFER: Ana (0) at cos 45 = 0.71, Bo
+    // (50) at cos 5 = 0.996, a margin of 0.29. Ana is withdrawn and Bo named in her place.
+    const near = person("Bo", [at(50)]);
+    expect(run([ANA, near], at(45), named)).toEqual({
+      kind: "withdraw",
+      name: "Ana",
+      next: expect.objectContaining({ kind: "name", name: "Bo" }) as never,
+    });
+    // Its positive control: at 10 degrees the voice is still Ana's (Bo at cos 40 = 0.77).
+    expect(run([ANA, near], at(10), named)).toEqual({ kind: "none" });
     // Under ACCEPT but over OFFER (0.71) and nobody else named: the name stays.
     expect(run([ANA, BO], off(45), named)).toEqual({ kind: "none" });
     // A withdrawn person is not offered to that label again.
@@ -253,6 +263,18 @@ describe("traps", () => {
     // From real exemplars: the label at 3 degrees between Ana (0) and Ana Ruiz (10).
     const ruiz = person("Ana Ruiz", [at(10)]);
     expect(run([ANA, ruiz, BO], at(3))).toMatchObject({ kind: "name", name: "Ana" });
+    // A label showing "Ana Ruiz" whose voice now ranks Ana a little higher keeps its name: the
+    // two are one voice, so Ana on top does not move it away.
+    const shown = label({ voice: { name: "Ana Ruiz", status: "named" } });
+    const swapped = [cand("Ana", 0.92, e0), cand("Ana Ruiz", 0.91, at(8)), cand("Bo", 0.2, at(90))];
+    expect(decideRanked(swapped, shown, T)).toEqual({ kind: "none" });
+    // The positive control: a new top of another voice (exemplars 0.64 alike) withdraws it.
+    const other = [cand("Cy", 0.92, at(58)), cand("Ana Ruiz", 0.7, at(8)), cand("Bo", 0.2, at(90))];
+    expect(decideRanked(other, shown, T)).toEqual({
+      kind: "withdraw",
+      name: "Ana Ruiz",
+      next: expect.objectContaining({ kind: "name", name: "Cy" }) as never,
+    });
   });
 
   test("null thresholds do nothing", () => {

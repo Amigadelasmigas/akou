@@ -14,8 +14,9 @@
  *   passed over; the next person down is the runner-up [VO-11].
  * - **Named:** p1 >= ACCEPT and p1 - runner-up >= MARGIN. **Offered:** p1 >= OFFER.
  * - **Withdrawn.** A label showing a name from a match loses it when that person falls below OFFER
- *   (ACCEPT when no offers), or when another person is now named. The label then decides again
- *   without the withdrawn person [VO-10]. An offer can still be raised to a name.
+ *   (ACCEPT when no offers), or when another person is now named, one that is not the shown
+ *   name's own voice under a second name. The label then decides again without the withdrawn
+ *   person [VO-10] [VO-11]. An offer can still be raised to a name.
  * - **Skipped:** a label with a typed name, a label that is not `c<N>`, a label under
  *   MIN_MATCH_SEC, and every label while the thresholds leave nothing to decide.
  *
@@ -106,13 +107,17 @@ export type Decision = Fresh | { kind: "withdraw"; name: string; next: Fresh };
 
 const NONE: Fresh = { kind: "none" };
 
+/** `q` is `top`'s voice under another name: its best exemplar is ACCEPT-similar to one of top's. */
+function sameVoice(top: Candidate, q: Candidate, accept: number): boolean {
+  return top.exemplars.some((e) => (cosine(q.best, e) ?? -1) >= accept);
+}
+
 /** The person after `top` who is not `top`'s voice under another name, or undefined. */
 function runnerUp(open: readonly Candidate[], accept: number): Candidate | undefined {
   const top = open[0] as Candidate;
   for (let i = 1; i < open.length; i++) {
     const q = open[i] as Candidate;
-    const same = top.exemplars.some((e) => (cosine(q.best, e) ?? -1) >= accept);
-    if (!same) return q;
+    if (!sameVoice(top, q, accept)) return q;
   }
   return undefined;
 }
@@ -145,7 +150,13 @@ export function decideRanked(
   const cur = label.voice;
   if (!cur) return now;
   const mine = open.find((c) => c.name === cur.name);
-  if (!mine || mine.score < floor || (now.kind === "name" && now.name !== cur.name))
+  // Another name now on top moves the label away, unless it is the shown name's own voice [VO-11].
+  const moved =
+    now.kind === "name" &&
+    now.name !== cur.name &&
+    !!mine &&
+    !sameVoice(open[0] as Candidate, mine, t.accept as number);
+  if (!mine || mine.score < floor || moved)
     return {
       kind: "withdraw",
       name: cur.name,
