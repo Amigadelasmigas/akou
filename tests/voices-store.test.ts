@@ -339,7 +339,14 @@ describe("voices store", () => {
       name: `${String(i).padStart(4, "0")} ${"x".repeat(95)}`,
       exemplars: Array.from({ length: MAX_EXEMPLARS }, (_, j) =>
         ex(
-          { call: crypto.randomUUID(), spk: `c${j + 10}`, dim: MAX_DIM, vec, secs: 1234.567, cons: 0.123456 },
+          {
+            call: crypto.randomUUID(),
+            spk: `c${j + 10}`,
+            dim: MAX_DIM,
+            vec,
+            secs: 1234.567,
+            cons: 0.123456,
+          },
           i % 900,
         ),
       ),
@@ -348,16 +355,19 @@ describe("voices store", () => {
     expect(Buffer.byteLength(full, "utf8")).toBeLessThan(MAX_FILE_BYTES);
     writeFileSync(r.path, full);
     // One more person is refused by the people limit, and the file is left as it was.
-    await expect(
-      r.store.upsert("New", ex({ call: "n", dim: MAX_DIM, vec })),
-    ).rejects.toThrow(`holds ${MAX_PEOPLE} people`);
+    await expect(r.store.upsert("New", ex({ call: "n", dim: MAX_DIM, vec }))).rejects.toThrow(
+      `holds ${MAX_PEOPLE} people`,
+    );
     expect(readFileSync(r.path, "utf8")).toBe(full);
     // A known person still learns.
     await r.store.upsert(person(0).name, ex({ call: "n", dim: MAX_DIM, vec }));
     expect((await r.store.list()).find((p) => p.name === person(0).name)?.calls[0]).toBe("n");
     // A larger embedding is refused.
     await expect(
-      r.store.upsert("New", ex({ call: "m", dim: MAX_DIM + 1, vec: new Float32Array(MAX_DIM + 1).fill(1) })),
+      r.store.upsert(
+        "New",
+        ex({ call: "m", dim: MAX_DIM + 1, vec: new Float32Array(MAX_DIM + 1).fill(1) }),
+      ),
     ).rejects.toThrow(/dim must be/);
     r.cleanup();
   });
