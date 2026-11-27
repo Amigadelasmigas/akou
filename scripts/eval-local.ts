@@ -6,6 +6,7 @@
  * numbers leave it; no word of a call is ever written.
  *
  *   bun scripts/eval-local.ts [--root ~/Recordings/akou] [--rttm <dir>] [--out docs/gates/eval-local-<date>.json]
+ *   bun scripts/eval-local.ts --voices <calls dir> [--model titanet-small|<file.onnx>] [--models <dir>] [--out <file>]
  *
  * - **WER against hand corrections.** A fix is a correction a person or an agent made once the
  *   transcript had begun: a `vocab.add` not written by the app, after the call's first line, and a
@@ -19,11 +20,21 @@
  *   seconds of the call's audio. The hypothesis is akou's speaker per line. Calls with more than one
  *   part are skipped and counted, because an RTTM file has one timeline.
  *
+ * - **Voices**, with `--voices` (TS-21b): whether a named voice is recognised in your other calls.
+ *   A label is a live `c<N>` speaker that you named, or the CLI did (`user`, `agent:cli`). A name
+ *   on two labels of one call, and a label whose name changed later, are dropped as likely merges
+ *   or splits. Each label's call lines of 1 s or more are embedded again from the part audio (the
+ *   call channel, cut at 12 s as the live worker cuts them) with the speaker model, TitaNet small
+ *   unless `--model` names another, and scored by `scripts/eval/voices.ts`. Every pair of labels
+ *   of one call, their lines interleaved, is a synthetic two-voice cluster for MIN_CONS. Needs
+ *   ffmpeg.
+ *
  * The result is checked before it is written: every value must be a number (or null where nothing
  * was scored), so a string, and with it any text of a call, makes the script refuse and write
  * nothing. Keep the RTTM files outside the repository: they are yours, not the project's.
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -31,8 +42,22 @@ import type { LogEvent } from "../src/core/log/events.ts";
 import { fold } from "../src/core/log/fold.ts";
 import { readLog } from "../src/core/log/reader.ts";
 import { EVENTS_FILE } from "../src/core/log/writer.ts";
+import { ffmpegCommand } from "../src/main/asr/decode.ts";
+import { ASR_RATE } from "../src/main/asr/engine.ts";
+import { partFile } from "../src/main/call/folder.ts";
 import { listCallDirs } from "../src/main/call/recovery.ts";
 import { der, normalizeText, parseRttm, type Turn, wordErrors } from "./eval/score.ts";
+import {
+  evaluateVoices,
+  finish,
+  LabelBuilder,
+  MAX_CHUNK_SECONDS,
+  MIN_CHUNK_SECONDS,
+  type MixedLabel,
+  openEmbedder,
+  type VoiceLabel,
+  voiceModelPath,
+} from "./eval/voices.ts";
 
 export interface LocalResult {
   calls: number;
@@ -210,11 +235,170 @@ export function numbersOnly(result: object): string {
   return `${JSON.stringify(result, null, 2)}\n`;
 }
 
+/** The authors whose names teach akou a voice: the user, in the window or through the CLI. */
+const TEACHERS = new Set(["user", "agent:cli"]);
+
+/**
+ * The live call labels of one call that stand for a person: `c<N>` labels named by `user` or
+ * `agent:cli`, less a label whose name changed later, a name given to two labels and a label merged
+ * into another: its lines show under the other's name, so the merge renamed it. Label to the
+ * person's key (the name, trimmed and lower case).
+ */
+export function namedLabels(events: readonly LogEvent[]): Map<string, string> {
+  const view = fold(events);
+  const names = new Map<string, { names: Set<string>; last: string; by: string }>();
+  for (const e of events) {
+    if (e.type !== "speaker.name" || !/^c\d+$/.test(e.spk)) continue;
+    const key = e.name.trim().toLowerCase();
+    const n = names.get(e.spk) ?? { names: new Set<string>(), last: key, by: e.by };
+    n.names.add(key);
+    n.last = key;
+    n.by = e.by;
+    names.set(e.spk, n);
+  }
+  const kept = [...names].filter(
+    ([spk, n]) => n.names.size === 1 && TEACHERS.has(n.by) && view.resolveSpeaker(spk) === spk,
+  );
+  const count = new Map<string, number>();
+  for (const [, n] of kept) count.set(n.last, (count.get(n.last) ?? 0) + 1);
+  return new Map(
+    kept
+      .filter(([, n]) => n.last !== "" && count.get(n.last) === 1)
+      .map(([spk, n]) => [spk, n.last]),
+  );
+}
+
+/** The call channel (right) of a part's audio, 16 kHz mono, through ffmpeg; null when missing. */
+export function readCallChannel(dir: string, part: number): Float32Array | null {
+  const opus = join(dir, partFile(part));
+  const wav = opus.replace(/\.opus$/, ".wav");
+  const path = existsSync(wav) ? wav : existsSync(opus) ? opus : null;
+  if (!path) return null;
+  const run = spawnSync(
+    ffmpegCommand(),
+    [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      path,
+      "-map",
+      "0:a:0",
+      "-af",
+      "pan=mono|c0=c1",
+      "-ar",
+      String(ASR_RATE),
+      "-f",
+      "f32le",
+      "pipe:1",
+    ],
+    { maxBuffer: 2 ** 31 },
+  );
+  if (run.status !== 0 || !run.stdout) return null;
+  const b = run.stdout;
+  return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + (b.length - (b.length % 4))));
+}
+
+export interface VoiceReaders {
+  /** One line's embedding, from 16 kHz mono samples. */
+  embed(samples: Float32Array): Float32Array;
+  /** A part's call channel, 16 kHz mono; null when it cannot be read. */
+  read(dir: string, part: number): Float32Array | null;
+}
+
+/** The labels and the synthetic two-voice clusters of every call under `root`. */
+export async function voiceLabels(
+  root: string,
+  io: VoiceReaders,
+): Promise<{ labels: VoiceLabel[]; mixed: MixedLabel[]; calls: number; skipped: number }> {
+  const labels: VoiceLabel[] = [];
+  const mixed: MixedLabel[] = [];
+  let calls = 0;
+  let skipped = 0;
+  for (const { dir } of listCallDirs(root)) {
+    const { events } = await readLog(join(dir, EVENTS_FILE));
+    const named = namedLabels(events);
+    if (named.size === 0) continue;
+    calls++;
+    const view = fold(events);
+    const ids = [...new Set(events.filter((e) => e.type === "seg").map((e) => e.id))];
+    const audio = new Map<number, Float32Array | null>();
+    const lines = new Map<string, { vec: Float32Array; secs: number }[]>();
+    let missing = false;
+    for (const id of ids) {
+      const s = view.segment(id);
+      if (s?.layer !== "live" || s.ch !== "call" || s.text === null || s.echo) continue;
+      if (!named.has(s.spk) || s.a1 - s.a0 < MIN_CHUNK_SECONDS) continue;
+      if (!audio.has(s.part)) audio.set(s.part, io.read(dir, s.part));
+      const samples = audio.get(s.part);
+      if (!samples) {
+        missing = true;
+        continue;
+      }
+      const end = Math.min(s.a1, s.a0 + MAX_CHUNK_SECONDS);
+      const cut = samples.subarray(Math.round(s.a0 * ASR_RATE), Math.round(end * ASR_RATE));
+      if (cut.length < MIN_CHUNK_SECONDS * ASR_RATE) continue;
+      const list = lines.get(s.spk) ?? [];
+      list.push({ vec: io.embed(cut), secs: end - s.a0 });
+      lines.set(s.spk, list);
+    }
+    if (missing) skipped++;
+    const at = view.parts()[0]?.wallStart ?? calls;
+    const spks = [...lines.keys()].sort();
+    for (const spk of spks) {
+      const b = new LabelBuilder();
+      for (const l of lines.get(spk) ?? []) b.add(l.vec, l.secs);
+      const label = b.label(dir, named.get(spk) as string, at);
+      if (label) labels.push(label);
+    }
+    for (let i = 0; i < spks.length; i++)
+      for (let j = i + 1; j < spks.length; j++) {
+        const a = lines.get(spks[i] as string) ?? [];
+        const c = lines.get(spks[j] as string) ?? [];
+        const b = new LabelBuilder();
+        for (let k = 0; k < Math.max(a.length, c.length); k++) {
+          const x = a[k];
+          const y = c[k];
+          if (x) b.add(x.vec, x.secs);
+          if (y) b.add(y.vec, y.secs);
+        }
+        const m = b.label("", "");
+        if (m) mixed.push({ cons: m.cons, snaps: m.snaps });
+      }
+  }
+  return { labels, mixed, calls, skipped };
+}
+
+async function voicesMain(root: string, flag: (n: string) => string | undefined): Promise<number> {
+  const embed = openEmbedder(voiceModelPath(flag("--model"), flag("--models")));
+  const { labels, mixed, calls, skipped } = await voiceLabels(root, {
+    embed,
+    read: readCallChannel,
+  });
+  if (labels.length === 0) {
+    console.error(`eval-local: no named call speaker under ${root}`);
+    return 66;
+  }
+  const day = new Date().toISOString().slice(0, 10);
+  const out =
+    flag("--out") ?? join(import.meta.dir, "..", "docs", "gates", `voices-local-${day}.json`);
+  mkdirSync(dirname(out), { recursive: true });
+  const run = evaluateVoices({ learn: labels, mixed, maxWrong: 0 });
+  return finish(
+    { ...run, result: { ...run.result, calls_read: calls, calls_without_audio: skipped } },
+    out,
+    "eval-local",
+  );
+}
+
 async function main(argv: string[]): Promise<number> {
   const flag = (n: string) => {
     const i = argv.indexOf(n);
     return i === -1 ? undefined : argv[i + 1];
   };
+  const voices = flag("--voices");
+  if (voices) return voicesMain(voices, flag);
   const root = flag("--root") ?? join(homedir(), "Recordings", "akou");
   const day = new Date().toISOString().slice(0, 10);
   const out =
