@@ -600,9 +600,9 @@ export class CallView {
         this.invalidateNames();
         break;
       case "speaker.voice": {
-        let byName = this.voices.get(e.spk);
-        if (!byName) this.voices.set(e.spk, (byName = new Map()));
+        const byName = this.voices.get(e.spk) ?? new Map<string, SpeakerVoice>();
         byName.set(e.name, e);
+        this.voices.set(e.spk, byName);
         this.invalidateNames();
         break;
       }
@@ -1049,10 +1049,7 @@ export class CallView {
    * The latest voice event of `root`'s merge group with one of `statuses` that no later `refused`
    * with the same name, on any member of the group, cancels.
    */
-  private liveVoice(
-    root: string,
-    ...statuses: SpeakerVoice["status"][]
-  ): SpeakerVoice | undefined {
+  private liveVoice(root: string, ...statuses: SpeakerVoice["status"][]): SpeakerVoice | undefined {
     if (this.voices.size === 0) return undefined;
     const group: SpeakerVoice[] = [];
     for (const [spk, byName] of this.voices) {
@@ -1061,7 +1058,9 @@ export class CallView {
     let best: SpeakerVoice | undefined;
     for (const v of group) {
       if (!statuses.includes(v.status) || (best && best.seq > v.seq)) continue;
-      const refused = group.some((r) => r.status === "refused" && r.name === v.name && r.seq > v.seq);
+      const refused = group.some(
+        (r) => r.status === "refused" && r.name === v.name && r.seq > v.seq,
+      );
       if (!refused) best = v;
     }
     return best;

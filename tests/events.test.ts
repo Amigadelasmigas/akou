@@ -244,9 +244,9 @@ describe("schema v1 (DESIGN 4.3)", () => {
   test("a voice name may leave out its score, and its status is one of three", () => {
     const { score: _s, ...voice } = EXAMPLES["speaker.voice"] as Record<string, unknown>;
     for (const status of ["named", "offered", "refused"]) {
-      expect(validateEvent({ ...env, type: "speaker.voice", ...voice, status, by: "user" }).ok).toBe(
-        true,
-      );
+      expect(
+        validateEvent({ ...env, type: "speaker.voice", ...voice, status, by: "user" }).ok,
+      ).toBe(true);
     }
     expect(validateEvent({ ...env, type: "speaker.voice", ...voice, status: "confirmed" }).ok).toBe(
       false,

@@ -615,7 +615,10 @@ describe("the fold: names found by voice", () => {
     const v = fold(b.events);
     const row = (spk: string) => v.roster().find((r) => r.spk === spk);
     // An offer is a guess: the label stays, the roster carries it.
-    expect(row("c1")).toMatchObject({ label: "Speaker 1", voice: { name: "Cleo", score: 0.62, status: "offered" } });
+    expect(row("c1")).toMatchObject({
+      label: "Speaker 1",
+      voice: { name: "Cleo", score: 0.62, status: "offered" },
+    });
     expect(row("c1")?.name).toBeUndefined();
     expect(row("c1")?.byVoice).toBeUndefined();
     expect(row("c2")).toMatchObject({
