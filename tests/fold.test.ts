@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LogEvent } from "../src/core/log/events.ts";
 import { CallView, fold, PROVISIONAL_TTL_MS, ProvisionalBoard } from "../src/core/log/fold.ts";
+import { callDecodeList } from "../src/main/asr/live-worker.ts";
 import { isDictionaryWord, LogBuilder, T0 } from "./helpers.ts";
 
 const S = 1000;
@@ -537,6 +538,118 @@ describe("the fold: speakers", () => {
     expect(v.resolve("f000001")?.speaker).toBe("Ben");
     expect(v.resolve("f000002")?.spk).toBe("s1");
     expect(v.speakerSuggestions().map((s) => s.final)).toEqual(["s1"]);
+  });
+});
+
+describe("the fold: names found by voice", () => {
+  type Status = "named" | "offered" | "refused";
+  const voice = (spk: string, name: string, status: Status, score?: number) =>
+    ({
+      type: "speaker.voice",
+      spk,
+      name,
+      status,
+      ...(score !== undefined ? { score } : {}),
+      by: status === "refused" ? "user" : "app",
+    }) as const;
+
+  test("[VO-1] a typed name beats a voice name written before it, after it, or after a refusal", () => {
+    // Positive control: with no speaker.name, the voice name shows.
+    const control = basicCall();
+    control.add(voice("c2", "Bea", "named", 0.81));
+    expect(fold(control.events).speakerLabel("c2")).toBe("Bea");
+
+    const before = basicCall();
+    before.add(voice("c2", "Bea", "named", 0.81));
+    before.add({ type: "speaker.name", spk: "c2", name: "Ben", by: "user" });
+    expect(fold(before.events).speakerLabel("c2")).toBe("Ben");
+
+    const after = basicCall();
+    after.add({ type: "speaker.name", spk: "c2", name: "Ben", by: "user" });
+    after.add(voice("c2", "Bea", "named", 0.81));
+    const v = fold(after.events);
+    expect(v.speakerLabel("c2")).toBe("Ben");
+    expect(v.resolve("l000003")?.speaker).toBe("Ben");
+
+    const refused = basicCall();
+    refused.add({ type: "speaker.name", spk: "c2", name: "Ben", by: "user" });
+    refused.add(voice("c2", "Bea", "named", 0.81));
+    refused.add(voice("c2", "Bea", "refused"));
+    refused.add(voice("c2", "Bo", "named", 0.9));
+    expect(fold(refused.events).speakerLabel("c2")).toBe("Ben");
+
+    // A typed name on any member of a merge group beats a voice name on its root.
+    const group = basicCall();
+    group.add(voice("c2", "Bea", "named", 0.81));
+    group.add({ type: "speaker.name", spk: "c1", name: "Ben", by: "user" });
+    group.add({ type: "speaker.merge", from: "c1", into: "c2" });
+    expect(fold(group.events).speakerLabel("c2")).toBe("Ben");
+  });
+
+  test("a refusal cancels that voice name only, and a later match with it names again", () => {
+    const b = basicCall();
+    b.add(voice("c2", "Bea", "named", 0.81));
+    const v = fold(b.events);
+    expect(v.speakerLabel("c2")).toBe("Bea");
+    v.apply(b.add(voice("c2", "Bea", "refused")));
+    expect(v.speakerLabel("c2")).toBe("Speaker 2");
+    expect(v.voiceFor("c2")).toBeUndefined();
+    // A refusal of another name leaves this one in force.
+    v.apply(b.add(voice("c2", "Bo", "named", 0.77)));
+    v.apply(b.add(voice("c2", "Bea", "refused")));
+    expect(v.speakerLabel("c2")).toBe("Bo");
+    // A refusal on another member of the merge group cancels the same name.
+    v.apply(b.add({ type: "speaker.merge", from: "c1", into: "c2" }));
+    v.apply(b.add(voice("c1", "Bo", "refused")));
+    expect(v.speakerLabel("c2")).toBe("Speaker 2");
+    // The latest event per speaker and name wins: a new match after the refusal names again.
+    v.apply(b.add(voice("c2", "Bo", "named", 0.8)));
+    expect(v.speakerLabel("c2")).toBe("Bo");
+    expect(fold(b.events).speakerLabel("c2")).toBe("Bo");
+  });
+
+  test("the roster carries the voice name, and byVoice only while it is the shown name", () => {
+    const b = basicCall();
+    b.add(voice("c1", "Cleo", "offered", 0.62));
+    b.add(voice("c2", "Bea", "named", 0.81));
+    const v = fold(b.events);
+    const row = (spk: string) => v.roster().find((r) => r.spk === spk);
+    // An offer is a guess: the label stays, the roster carries it.
+    expect(row("c1")).toMatchObject({ label: "Speaker 1", voice: { name: "Cleo", score: 0.62, status: "offered" } });
+    expect(row("c1")?.name).toBeUndefined();
+    expect(row("c1")?.byVoice).toBeUndefined();
+    expect(row("c2")).toMatchObject({
+      label: "Bea",
+      name: "Bea",
+      namedBy: "app",
+      byVoice: true,
+      voice: { name: "Bea", score: 0.81, status: "named" },
+    });
+    expect(v.voiceFor("c2")).toEqual({ name: "Bea", score: 0.81, status: "named" });
+    // A merged member shows its root's voice.
+    v.apply(b.add({ type: "speaker.merge", from: "c3", into: "c2" }));
+    expect(row("c3")).toMatchObject({ mergedInto: "c2", byVoice: true, voice: { name: "Bea" } });
+    // Typed: the name is the user's, the voice stays for the window to show.
+    v.apply(b.add({ type: "speaker.name", spk: "c2", name: "Ben", by: "user" }));
+    expect(row("c2")).toMatchObject({ name: "Ben", namedBy: "user", voice: { name: "Bea" } });
+    expect(row("c2")?.byVoice).toBeUndefined();
+    // A voice event re-renders every line, as a name does.
+    v.apply(b.add(voice("c1", "Cleo", "named", 0.85)));
+    expect(v.resolve("l000002")?.speaker).toBe("Cleo");
+  });
+
+  test("[VO-7] a name found by voice never enters the read-time rules or the decode list", () => {
+    const b = basicCall();
+    b.seg({ id: "l000004", w0: T0 + 4 * S, text: "thanks siobahn" });
+    b.add(voice("c2", "Siobhan", "named", 0.9));
+    const v = fold(b.events, { isDictionaryWord });
+    expect(v.speakerLabel("c2")).toBe("Siobhan");
+    expect(v.resolve("l000004")?.text).toBe("thanks siobahn");
+    expect(callDecodeList(v, "fake-parakeet").entries.map((e) => e.term)).not.toContain("Siobhan");
+    // Positive control: the same name typed as a speaker.name does create a rule and a decode entry.
+    v.apply(b.add({ type: "speaker.name", spk: "c1", name: "Siobhan", by: "user" }));
+    expect(v.resolve("l000004")?.text).toBe("thanks Siobhan");
+    expect(callDecodeList(v, "fake-parakeet").entries.map((e) => e.term)).toContain("Siobhan");
   });
 });
 

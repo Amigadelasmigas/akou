@@ -352,6 +352,7 @@ const REEXPORT_ON: ReadonlySet<string> = new Set([
   // The export file takes the new title's name (PG-A4).
   "call.renamed",
   "speaker.name",
+  "speaker.voice",
   "speaker.merge",
   "speaker.unmerge",
   "vocab.add",

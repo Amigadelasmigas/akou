@@ -59,6 +59,7 @@ export const EXAMPLES: Record<string, Record<string, unknown>> = {
   "speaker.merge": { from: "c3", into: "c2" },
   "speaker.unmerge": { from: "c3", into: "c2" },
   "speaker.name": { spk: "c2", name: "Ben", by: "agent:claude-code" },
+  "speaker.voice": { spk: "c2", name: "Ben", status: "named", score: 0.82, by: "app" },
   "speaker.map": { final: "f1", live: "c2", overlap: 0.82 },
   "speaker.suggest": { final: "f2", live: "c3", overlap: 0.41 },
   note: {
@@ -178,6 +179,7 @@ describe("schema v1 (DESIGN 4.3)", () => {
       seg: ["lang"],
       "final.done": ["languages", "warning"],
       "vocab.learned": ["heard", "lines", "kept", "vocab"],
+      "speaker.voice": ["score"],
     };
     let checked = 0;
     for (const type of EVENT_TYPES) {
@@ -237,6 +239,19 @@ describe("schema v1 (DESIGN 4.3)", () => {
       ...done
     } = EXAMPLES["final.done"] as Record<string, unknown>;
     expect(validateEvent({ ...env, type: "final.done", ...done }).ok).toBe(true);
+  });
+
+  test("a voice name may leave out its score, and its status is one of three", () => {
+    const { score: _s, ...voice } = EXAMPLES["speaker.voice"] as Record<string, unknown>;
+    for (const status of ["named", "offered", "refused"]) {
+      expect(validateEvent({ ...env, type: "speaker.voice", ...voice, status, by: "user" }).ok).toBe(
+        true,
+      );
+    }
+    expect(validateEvent({ ...env, type: "speaker.voice", ...voice, status: "confirmed" }).ok).toBe(
+      false,
+    );
+    expect(validateEvent({ ...env, type: "speaker.voice", ...voice, score: "0.8" }).ok).toBe(false);
   });
 
   test("the envelope is required: seq positive integer, t a number", () => {

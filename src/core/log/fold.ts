@@ -49,6 +49,7 @@ import {
   type ShareStarted,
   type SpeakerMap,
   type SpeakerSuggest,
+  type SpeakerVoice,
   type VocabUsed,
   type WebhookDone,
 } from "./events.ts";
@@ -188,8 +189,18 @@ export interface SpeakerView {
   label: string;
   name?: string;
   namedBy?: string;
+  /** The name akou found by voice that is in force for this speaker, named or offered. */
+  voice?: VoiceView;
+  /** The shown name came from a voice match, not from a typed `speaker.name`. */
+  byVoice?: true;
   /** Set when this id is merged into another. */
   mergedInto?: string;
+}
+
+export interface VoiceView {
+  name: string;
+  score?: number;
+  status: "named" | "offered";
 }
 
 export interface NoteView {
@@ -356,6 +367,8 @@ interface NameEntry {
   name: string;
   by: string;
   seq: number;
+  /** Set when the name came from a `speaker.voice`, never from a typed `speaker.name`. */
+  byVoice?: true;
 }
 
 interface RenderCacheEntry {
@@ -390,6 +403,8 @@ export class CallView {
   private readonly _parts = new Map<number, PartView>();
 
   private readonly names = new Map<string, NameEntry>();
+  /** The latest `speaker.voice` per speaker id, then per name. */
+  private readonly voices = new Map<string, Map<string, SpeakerVoice>>();
   private readonly merges = new Map<string, string>();
   private readonly finalMap = new Map<string, SpeakerMap>();
   private readonly suggestions = new Map<string, SpeakerSuggest>();
@@ -584,6 +599,13 @@ export class CallView {
         this.names.set(e.spk, { name: e.name, by: e.by, seq: e.seq });
         this.invalidateNames();
         break;
+      case "speaker.voice": {
+        let byName = this.voices.get(e.spk);
+        if (!byName) this.voices.set(e.spk, (byName = new Map()));
+        byName.set(e.name, e);
+        this.invalidateNames();
+        break;
+      }
       case "speaker.map":
         this.finalMap.set(e.final, e);
         this.suggestions.delete(e.final);
@@ -1004,6 +1026,10 @@ export class CallView {
     return this.resolveSpeaker(mapped);
   }
 
+  /**
+   * A typed name first, in every order: a voice name shows only while no `speaker.name` names the
+   * speaker or its merge group [VO-1].
+   */
   private nameOf(root: string): NameEntry | undefined {
     const own = this.names.get(root);
     if (own) return own;
@@ -1014,7 +1040,39 @@ export class CallView {
         best = entry;
       }
     }
+    if (best) return best;
+    const voice = this.liveVoice(root, "named");
+    return voice && { name: voice.name, by: voice.by, seq: voice.seq, byVoice: true };
+  }
+
+  /**
+   * The latest voice event of `root`'s merge group with one of `statuses` that no later `refused`
+   * with the same name, on any member of the group, cancels.
+   */
+  private liveVoice(
+    root: string,
+    ...statuses: SpeakerVoice["status"][]
+  ): SpeakerVoice | undefined {
+    if (this.voices.size === 0) return undefined;
+    const group: SpeakerVoice[] = [];
+    for (const [spk, byName] of this.voices) {
+      if (this.resolveSpeaker(spk) === root) group.push(...byName.values());
+    }
+    let best: SpeakerVoice | undefined;
+    for (const v of group) {
+      if (!statuses.includes(v.status) || (best && best.seq > v.seq)) continue;
+      const refused = group.some((r) => r.status === "refused" && r.name === v.name && r.seq > v.seq);
+      if (!refused) best = v;
+    }
     return best;
+  }
+
+  /** The voice name in force for a speaker (already resolved or not): named or offered. */
+  voiceFor(spk: string): VoiceView | undefined {
+    const v = this.liveVoice(this.resolveSpeaker(spk), "named", "offered");
+    if (!v) return undefined;
+    const status = v.status === "named" ? "named" : "offered";
+    return { name: v.name, ...(v.score !== undefined ? { score: v.score } : {}), status };
   }
 
   /** Display label for a speaker id (already resolved or not). */
@@ -1043,11 +1101,14 @@ export class CallView {
     return [...ids].sort(speakerOrder).map((spk) => {
       const root = this.resolveSpeaker(spk);
       const named = this.nameOf(root);
+      const voice = this.voiceFor(root);
       return {
         spk,
         label: this.speakerLabel(spk),
         name: named?.name,
         namedBy: named?.by,
+        ...(voice ? { voice } : {}),
+        ...(named?.byVoice ? { byVoice: true as const } : {}),
         mergedInto: root !== spk ? root : undefined,
       };
     });
@@ -1109,6 +1170,7 @@ export class CallView {
       if (p.status === "accepted") rules.push({ term: p.term, heard: p.heard, scope: "file" });
     }
     const names = new Set<string>();
+    // Typed names only: a name akou found by voice is a guess and never corrects text [VO-7].
     for (const n of this.names.values()) names.add(n.name);
     if (this._call?.user) names.add(this._call.user);
     for (const name of names) rules.push({ term: name, heard: [], scope: "name" });

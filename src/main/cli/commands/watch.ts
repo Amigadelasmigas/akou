@@ -53,7 +53,13 @@ const PROMPT = "ask> ";
 const BACKLOG = 20;
 
 /** Log events after which the rendered transcript may have new or changed lines. */
-const LINE_EVENTS = new Set(["seg", "speaker.name", "speaker.merge", "speaker.unmerge"]);
+const LINE_EVENTS = new Set([
+  "seg",
+  "speaker.name",
+  "speaker.voice",
+  "speaker.merge",
+  "speaker.unmerge",
+]);
 
 /**
  * The terminal's bottom two rows: the in-progress line and the prompt. Each stays inside one row,

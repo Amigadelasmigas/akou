@@ -3035,11 +3035,13 @@ export function streamHotwords(h: PreparedHotwords): string | undefined {
 
 /**
  * A call's decode list as it stands: call-scoped adds, attendees and speaker names, then the
- * vocabulary files (decode-list.ts has the priority order and the cap).
+ * vocabulary files (decode-list.ts has the priority order and the cap). A name akou found by voice
+ * is a guess and stays out [VO-7].
  */
 export function callDecodeList(view: CallView, model: string, vocab?: VocabSource): DecodeList {
   const names = view
     .roster()
+    .filter((r) => !r.byVoice)
     .map((r) => r.name)
     .filter((n): n is string => !!n);
   return buildDecodeList({
