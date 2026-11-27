@@ -231,6 +231,16 @@ export const SETTINGS = {
     windowWritable: true,
     doc: "The desktop app also listens on `network.bind` for API keys (`akou keys create`), so a phone or another computer reads what each key's scopes allow: a `read` key sees every call, dictation and job. The app's own token is refused there. Server mode ignores it. Applies at the next start.",
   },
+  "voices.enabled": {
+    type: "boolean",
+    default: true,
+    // Whether akou keeps voiceprints is the user's call, in the window or the file; neither the
+    // API token nor a key may turn it on, and server mode never has it.
+    apiWritable: false,
+    windowWritable: true,
+    keyWritable: false,
+    doc: "akou remembers the voices of call speakers you name and names them in later calls. The voiceprints stay in `voices.yaml` in the config folder on this computer and are never sent. Off: akou stops learning and matching voices and keeps the file. Set in the window or the file, never over the API. Server mode never has it.",
+  },
   "network.bind": {
     type: "string",
     min: 1,
