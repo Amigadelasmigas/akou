@@ -315,6 +315,17 @@ stdout  one JSON object per line
 - The client (`src/main/asr/nemotron.ts`) starts one helper per final pass and one per live transcriber, with `asr.threads` threads each. Measured on an Apple M4 at 2 threads: live at 5.6 times real time and about 1 GB resident, the final pass at over 40 times real time. The CoreML provider cannot take the graph (dynamic cache shapes), so v1 runs on the CPU.
 - The model is the ONNX export published with parakeet-rs, pinned to a revision and a SHA-256 in `models.ts`; the weights are NVIDIA's under OpenMDW-1.1. The `diarize` CI job runs the real model through the helper on macOS, Linux and Windows, in both modes, over a generated conversation of two synthetic voices (`tests/fixtures/two-voices.wav`, made by `scripts/two-voices.sh`), and fails unless each mode tells the two voices apart.
 
+### 3.5 Voices across calls
+
+A voice a person named in one call is named again in later calls. This runs on the Host, in app mode only; server mode never has it [VO-8]. `voices.enabled` (on by default) turns it off: nothing learns or matches, and `voices.yaml` stays as it is. The numbers it decides by come from [gates/voices.json](gates/voices.json), per speaker embedder. The live embedder is TitaNet-small, and while its entry holds no numbers akou names no one by voice.
+
+- **The file.** `<config>/voices.yaml` keeps, per person, up to 8 voiceprints (exemplars), each the centroid of one live label of one call (`src/main/voices/store.ts`). It stays on this computer.
+- **Learning** (`src/main/voices/learn.ts`), on each `speaker.name` and `speaker.centroid`. A label teaches when it is a `c<N>` label that is its merge group's root, its name is a `speaker.name` by `user` or `agent:cli` (the window, its ask box, the CLI), and its centroid has `secs` and `cons` with at least MIN_LEARN_SEC of speech. The exemplar is kept under that name, one per (call, label): a later centroid replaces it, and a new name moves it. An `app` name, an MCP agent's name, a name found by voice and an offer never teach [VO-5]. The consistency score is kept and gates nothing.
+- **Matching** (`src/main/voices/match.ts`), on each `speaker.centroid` only. Each centroid write of a label is one decision for that label, made in the order the writes land, the same way the voices evaluation (`scripts/eval/voices.ts`) drives the same function, so its numbers describe the app. People shown on other labels of the call, by a typed name, a voice name or an offer, are left out. So are people refused on this label or withdrawn from it, and the exemplars this call taught. A decision writes `speaker.voice` by `app`: `named` or `offered`, with the score to 2 places. A label whose voice moves away from its name gets `refused` for it first, then a new decision without that person [VO-10] [VO-11]. A label with a typed name is left alone, and a name typed after a voice name wins and teaches [VO-1]. The first centroid comes once a label holds 20 s of speech, then every five minutes and at each part end (3.2).
+- **One queue.** Learning and matching run one event at a time. A decision reads the fold and writes its events in the same turn, so it never acts on a fold a later event changed. The file is read again only when it changes on disk.
+- **Purge.** A call deleted for good (Empty trash, or the purge at start after 30 days) loses its exemplars; a trash and a restore keep them [VO-4].
+- **The log** gets counts only, never a name or a vector.
+
 ## 4. The event log
 
 ### 4.1 On disk
