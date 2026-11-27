@@ -371,6 +371,7 @@ Folder names are unique by construction. akou never writes into an existing call
 | `speaker.centroid` | `spk`, `vec` (base64 float32) | Live clustering state |
 | `speaker.merge` / `speaker.unmerge` | `from`, `into` | Applied at read time |
 | `speaker.name` | `spk`, `name`, `by` | Latest wins |
+| `speaker.voice` | `spk`, `name`, `status: named \| offered \| refused`, `score?`, `by` | A name akou found by voice (`named`, `offered`), or the user's refusal of one (`refused`). The latest per (`spk`, `name`) wins, and a `refused` cancels that name. Any `speaker.name` beats it, written before or after. Never in the decode list |
 | `speaker.map` / `speaker.suggest` | `final`, `live`, `overlap` | Final-to-live identity |
 | `note` / `note.del` | `id`, `rev`, `text`, `w`, `afterSeq`, `by: user \| agent:<client>` | Notepad lines |
 | `remember` | `id`, `rev`, `text`, `by` | Agent memory, included in every pack. Same id with a higher `rev` corrects it; `text: null` retracts it |

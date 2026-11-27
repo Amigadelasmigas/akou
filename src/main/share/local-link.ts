@@ -44,6 +44,7 @@ const TICK_MS = 500;
 /** Events after which every line a viewer holds may render differently. */
 const RENAMING: ReadonlySet<string> = new Set([
   "speaker.name",
+  "speaker.voice",
   "speaker.merge",
   "speaker.unmerge",
   "speaker.map",

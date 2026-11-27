@@ -52,7 +52,7 @@ import {
   vocabPaths,
   writeVocabFile,
 } from "../../vocab/files.ts";
-import { type KnownTerm, type PassInput, runPass } from "../../vocab/pass.ts";
+import { type KnownTerm, type PassInput, passNames, runPass } from "../../vocab/pass.ts";
 import { suggestTerms } from "../../vocab/suggest.ts";
 import { errorsOf } from "../errors.ts";
 import { HttpError, json, type RouteDoc, type Router } from "../http.ts";
@@ -173,8 +173,7 @@ async function vocabState(app: ApiApp, view: CallView) {
   for (const e of entries) if (e.confirmed) put(e.term, e.heard);
   for (const v of view.callVocabulary()) put(v.term, v.heard);
   for (const p of view.proposals("accepted")) put(p.term, p.heard);
-  for (const r of view.roster()) if (r.name) put(r.name, []);
-  if (view.call?.user) put(view.call.user, []);
+  for (const name of passNames(view)) put(name, []);
   const rejected = new Set(files.rejected);
   for (const p of view.proposals("rejected")) rejected.add(p.term);
   const input: PassInput = { known: [...known.values()], rejected: [...rejected] };

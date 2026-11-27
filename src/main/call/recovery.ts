@@ -116,6 +116,7 @@ export const CHANGES: ReadonlySet<string> = new Set([
   "note",
   "note.del",
   "speaker.name",
+  "speaker.voice",
   "speaker.merge",
   "speaker.unmerge",
   "speaker.map",
