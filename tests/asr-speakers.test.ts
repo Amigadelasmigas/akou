@@ -193,7 +193,7 @@ describe("the speech and consistency of a cluster", () => {
     ]);
   });
 
-  test("a restored cluster keeps secs and cons from its event, and starts at 0 without them", () => {
+  test("a restored cluster keeps secs and cons from its event, and counts only new lines without them", () => {
     const s = new LiveSpeakers();
     s.restore({
       centroids: [
@@ -211,7 +211,8 @@ describe("the speech and consistency of a cluster", () => {
     // Ten restored lines that agreed 0.9, and one that agrees fully.
     expect(by.c1?.cons).toBeCloseTo((0.9 * 10 + 1) / 11, 3);
     expect(by.c2?.secs).toBe(2);
-    expect(by.c2?.cons).toBeCloseTo(1 / 11, 3);
+    // No `cons` in its event: only the one line heard since, which agrees fully.
+    expect(by.c2?.cons).toBeCloseTo(1, 3);
   });
 
   test("a merge adds the merged cluster's speech and an unmerge takes it back", () => {

@@ -121,7 +121,12 @@ export class LiveSpeakers {
       const vec = decodeVec(c.vec);
       const sum = new Float32Array(vec.length);
       for (let i = 0; i < vec.length; i++) sum[i] = (vec[i] as number) * RESTORED_WEIGHT;
-      const acc = Accum.resume(vec, c.secs ?? 0, c.cons ?? 0, RESTORED_WEIGHT);
+      // An event written without `cons` says nothing about agreement: its voiceprint starts empty,
+      // so `cons` counts only the lines heard from here on.
+      const acc =
+        c.cons === undefined
+          ? Accum.resume(vec, c.secs ?? 0, 0, 0)
+          : Accum.resume(vec, c.secs ?? 0, c.cons, RESTORED_WEIGHT);
       this.clusters.set(c.spk, {
         id: c.spk,
         n: RESTORED_WEIGHT,

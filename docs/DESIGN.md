@@ -368,7 +368,7 @@ Folder names are unique by construction. akou never writes into an existing call
 | `mute` / `unmute` | `part`, `a` | The timeline continues; mic is zeros |
 | `gap` | `part`, `a`, `wallFrom`, `wallTo`, `reason: sleep` | Detected from a monotonic jump |
 | `seg` | `id`, `rev`, `layer`, `part`, `ch`, `spk`, `a0`, `a1`, `w0`, `w1`, `text`, `lang?`, `model`, `echo?`, `by?` | A revision may carry only changed fields. `text: null` retracts |
-| `speaker.centroid` | `spk`, `vec` (base64 float32), optional `secs` (seconds of speech, 1 decimal) and `cons` (0 to 1, how well the cluster's lines agree with their own direction, 3 decimals; a cluster holding two voices scores lower) | Live clustering state, and the speech and consistency of each cluster, restored with it |
+| `speaker.centroid` | `spk`, `vec` (base64 float32), optional `secs` (seconds of speech, 1 decimal) and `cons` (0 to 1, how well the cluster's lines agree with their own direction, 3 decimals; a cluster holding two voices scores lower) | Live clustering state, and the speech and consistency of each cluster, restored with it; a cluster restored without `cons` scores only the lines heard after the restore |
 | `speaker.merge` / `speaker.unmerge` | `from`, `into` | Applied at read time |
 | `speaker.name` | `spk`, `name`, `by` | Latest wins |
 | `speaker.voice` | `spk`, `name`, `status: named \| offered \| refused`, `score?`, `by` | A name akou found by voice (`named`, `offered`), or the user's refusal of one (`refused`). The latest per (`spk`, `name`) wins, and a `refused` cancels that name. Any `speaker.name` beats it, written before or after. Never in the decode list |
