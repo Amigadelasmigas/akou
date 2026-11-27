@@ -1429,7 +1429,7 @@ jobs:
           fi
       - name: a virtual audio cable
         id: cable
-        uses: LABSN/sound-ci-helpers@e9d6ba52163a3283714a68412036ddf33f78d49c # v1.0.4
+        uses: LABSN/sound-ci-helpers@9df0c7029878c4491796f328e463bb45a6e9979e # v1.0.4
       - name: the Windows audio service
         continue-on-error: true
         shell: pwsh

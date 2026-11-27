@@ -21,6 +21,7 @@ import type { LogEvent } from "../src/core/log/events.ts";
 import { fold } from "../src/core/log/fold.ts";
 import {
   exportCall,
+  exportedLog,
   frontmatterId,
   isoLocal,
   renderEnhanced,
@@ -299,6 +300,43 @@ describe("attachments", () => {
     } finally {
       r.cleanup();
     }
+  });
+
+  test("[VO-6] The export has no centroid: the copied log drops every speaker.centroid line and keeps every other line", () => {
+    const b = standup();
+    b.add({ type: "speaker.centroid", spk: "c1", vec: "AAAAAA==" });
+    b.add({ type: "speaker.centroid", spk: "c2", vec: "AAAAAA==" });
+    const r = rig(b);
+    try {
+      const lines = (path: string) => readFileSync(path, "utf8").split("\n").filter(Boolean);
+      // The log as the export reads it, before the export records itself in it.
+      const source = lines(join(r.dir, "events.jsonl"));
+      r.run();
+      const copied = lines(join(r.root, "work", "attachments", BASE, "events.jsonl"));
+      const isCentroid = (l: string) => JSON.parse(l).type === "speaker.centroid";
+      // Positive control: the call's own log holds the centroids.
+      expect(source.filter(isCentroid)).toHaveLength(2);
+      expect(copied.filter(isCentroid)).toHaveLength(0);
+      expect(copied).toEqual(source.filter((l) => !isCentroid(l)));
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("[VO-6] a torn, unparsable or merely mentioning line is copied byte for byte", () => {
+    const centroid = '{"seq":2,"t":1,"type":"speaker.centroid","spk":"c1","vec":"AAAA"}\n';
+    const kept = [
+      '{"seq":1,"t":1,"type":"call.created"}\n',
+      '{"seq":3,"t":1,"type":"note","text":"type speaker.centroid"}\n',
+      "not json speaker.centroid\n",
+      '{"seq":4,"type":"speaker.centr\u00e9',
+    ];
+    const log = Buffer.from([kept[0], centroid, kept[1], kept[2], kept[3]].join(""), "utf8");
+    // A torn last line cut inside a character keeps its bytes.
+    const torn = Buffer.concat([log, Buffer.from([0xc3])]);
+    expect(exportedLog(torn)).toEqual(
+      Buffer.concat([Buffer.from(kept.join(""), "utf8"), Buffer.from([0xc3])]),
+    );
   });
 
   test("copy writes a real file; none leaves the audio out of the folder and the frontmatter", () => {
