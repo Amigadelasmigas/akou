@@ -113,6 +113,7 @@ const MAIN: Layout = [
       "app.hotkey",
     ],
   },
+  { title: "Speakers", items: ["voices.enabled"] },
   {
     title: "Notes and AI",
     items: [

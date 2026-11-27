@@ -2,6 +2,11 @@
 
 All notable changes to akou. Versions follow [semantic versioning](https://semver.org); the 0.x releases were prereleases, and from 1.0.0 on a release is a full release unless its version has a prerelease part, such as 1.1.0-rc.1.
 
+## Unreleased
+
+### Speakers
+- **Settings has a Speakers section, with "Recognise voices across calls" (`voices.enabled`, on by default).** It is the switch for the local voices file, `voices.yaml` in the config folder: a voiceprint per call speaker you name, at most 8 per person, written at mode 0600 and never sent. An exemplar older than 3 years is dropped. Only the window or the config file sets the switch; the API, an `ak_` key and server mode cannot. Nothing learns or matches voices yet.
+
 ## 1.7.6 — the mark in the Mac menu bar is as large as its neighbours
 
 On a Mac, the akou mark in the menu bar was 10 pt tall, while the icons around it are about 14 pt. It is now 14 pt, with a slightly heavier stroke, and every straight edge still lands on a whole pixel, so it stays sharp on a Retina display. The item is still 32 pt wide. Windows, Linux and the recording icon are unchanged. This release also records a new reading of the Anthropic and OpenAI terms ([docs/providers.md](docs/providers.md#the-reading-of-2026-11-05)). The 8-hour soak did not run for this release: it exercises the call-recording helper, and nothing in this release touches it.

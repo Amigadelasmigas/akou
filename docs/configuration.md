@@ -80,6 +80,12 @@ The tables below are generated from the settings registry in [src/main/config/sc
 | `network.bind` (window or file) | `"tailnet"` | Where the network listener listens: `tailnet` (the tailnet encrypts it; with no tailnet address yet, it looks again every 30 s), `lan` (plain HTTP, visible to that network) or an IPv4 address. Applies at the next start. |
 | `network.port` (window or file) | `8478` | Port of the network listener. 0 picks a free port. Applies at the next start. |
 
+### voices
+
+| Key | Default | What it does |
+|---|---|---|
+| `voices.enabled` (window or file) | `true` | akou remembers the voices of call speakers you name and names them in later calls. The voiceprints stay in `voices.yaml` in the config folder on this computer and are never sent. Off: akou stops learning and matching voices and keeps the file. Set in the window or the file, never over the API. Server mode never has it. |
+
 ### server
 
 | Key | Default | What it does |
