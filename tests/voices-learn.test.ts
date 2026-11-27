@@ -5,13 +5,15 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Ranked, simulate } from "../scripts/eval/voices.ts";
 import type { EventDraft, LogEvent } from "../src/core/log/events.ts";
 import { CallView } from "../src/core/log/fold.ts";
 import { encodeVec } from "../src/main/asr/speakers.ts";
-import { LIVE_EMBEDDER, VoiceHost } from "../src/main/voices/host.ts";
+import { CallManager, TRASH_DIR } from "../src/main/call/manager.ts";
+import type { CaptureEngine } from "../src/main/capture/engine.ts";
+import { LIVE_EMBEDDER, VoiceHost, VoicePurge } from "../src/main/voices/host.ts";
 import { lessonFor } from "../src/main/voices/learn.ts";
 import { rankPeople } from "../src/main/voices/match.ts";
 import { type Person, VoiceStore } from "../src/main/voices/store.ts";
@@ -59,8 +61,10 @@ class Rig {
   constructor(
     readonly dir: string,
     thresholds: VoiceThresholds = T,
+    makeStore: (path: string) => VoiceStore = (path) =>
+      new VoiceStore(path, { now: () => T0, log: () => {} }),
   ) {
-    this.store = new VoiceStore(join(dir, "voices.yaml"), { now: () => T0, log: () => {} });
+    this.store = makeStore(join(dir, "voices.yaml"));
     this.host = new VoiceHost({
       store: this.store,
       enabled: () => this.enabled,
@@ -127,10 +131,10 @@ afterEach(() => {
   dirs = [];
 });
 
-function rig(thresholds: VoiceThresholds = T): Rig {
+function rig(thresholds: VoiceThresholds = T, makeStore?: (path: string) => VoiceStore): Rig {
   const d = tempDir("akou-voices-learn-");
   dirs.push(d);
-  return new Rig(d.dir, thresholds);
+  return new Rig(d.dir, thresholds, makeStore);
 }
 
 async function seed(r: Rig, people: Person[]): Promise<void> {
@@ -374,7 +378,7 @@ describe("the Host and the voices evaluation make the same decisions", () => {
     { spk: "c3", t: 5, secs: 5, vec: at(3) }, // under MIN_MATCH_SEC
     { spk: "c1", t: 10, secs: 12, vec: at(5) }, // Ana named
     { spk: "c2", t: 20, secs: 15, vec: at(40) }, // Ana taken: Bo offered
-    { spk: "c1", t: 30, secs: 40, vec: at(80) }, // drifts off Ana: withdrawn, Bo taken
+    { spk: "c1", t: 30, secs: 40, vec: off(68) }, // drifts to Cy: Ana withdrawn, Cy named
     { spk: "c2", t: 40, secs: 30, vec: at(85) }, // Bo raised to a name
     { spk: "c3", t: 50, secs: 20, vec: at(3) }, // Ana free on c3: named
   ];
@@ -419,9 +423,9 @@ describe("the Host and the voices evaluation make the same decisions", () => {
 
   test("one recorded call replayed through both gives the same speaker.voice decisions", async () => {
     const want = evaluation();
-    // The sequence exercises a name, an offer, a withdrawal and a raise.
+    // The sequence exercises a name, an offer, a withdrawal followed by a new name, and a raise.
     expect(want).toEqual([
-      { named: ["Ana"], offered: [], final: null, withdrawn: 1 },
+      { named: ["Ana", "Cy"], offered: [], final: { name: "Cy", status: "named" }, withdrawn: 1 },
       { named: ["Bo"], offered: ["Bo"], final: { name: "Bo", status: "named" }, withdrawn: 0 },
       { named: ["Ana"], offered: [], final: { name: "Ana", status: "named" }, withdrawn: 0 },
     ]);
@@ -434,5 +438,211 @@ describe("the Host and the voices evaluation make the same decisions", () => {
       swapped[3] as (typeof writes)[number],
     ];
     expect(await host(swapped)).not.toEqual(want);
+  });
+});
+
+describe("the Host keeps each rule", () => {
+  test("[VO-10] a person refused on a label is never offered to it again in the call", async () => {
+    const r = rig();
+    await seed(r, [person("Ben", [at(0)])]);
+    r.speakers("c1", "c2");
+    r.add({ type: "speaker.voice", spk: "c1", name: "Ben", status: "refused", by: "user" });
+    r.add(centroid("c1", at(2), 30));
+    await r.settle();
+    expect(r.voices().filter((e) => e.status !== "refused")).toEqual([]);
+    // The positive control: a label that refused nobody is named.
+    r.add(centroid("c2", at(2), 30));
+    await r.settle();
+    expect(r.voices().at(-1)).toMatchObject({ spk: "c2", name: "Ben", status: "named" });
+  });
+
+  test("a typed name on another label takes its person", async () => {
+    for (const typed of ["Ben", "Bo"]) {
+      const r = rig();
+      await seed(r, [person("Ben", [at(0)])]);
+      r.speakers("c1", "c2");
+      // Typed by an agent, so it teaches nothing and the store holds only the earlier Ben.
+      r.add({ type: "speaker.name", spk: "c1", name: typed, by: "agent:claude-code" });
+      r.add(centroid("c2", at(2), 30));
+      await r.settle();
+      // The positive control is "Bo": Ben is free and c2 is named.
+      expect(r.voices()).toHaveLength(typed === "Ben" ? 0 : 1);
+    }
+  });
+
+  test("a label merged into another is not matched; unmerged, it is", async () => {
+    const r = rig();
+    await seed(r, [person("Ben", [at(0)])]);
+    r.speakers("c1", "c2");
+    r.add({ type: "speaker.merge", from: "c2", into: "c1" });
+    r.add(centroid("c2", at(2), 30));
+    await r.settle();
+    expect(r.voices()).toEqual([]);
+    r.add({ type: "speaker.unmerge", from: "c2", into: "c1" });
+    r.add(centroid("c2", at(2), 40));
+    await r.settle();
+    expect(r.voices()).toMatchObject([{ spk: "c2", name: "Ben", status: "named" }]);
+  });
+
+  test("a centroid without cons (an older log) is neither matched nor learnt", async () => {
+    const r = rig();
+    await seed(r, [person("Ben", [at(0)])]);
+    r.speakers("c1", "c2");
+    r.add({ type: "speaker.centroid", spk: "c1", vec: encodeVec(at(2)), secs: 30 });
+    r.add({ type: "speaker.centroid", spk: "c2", vec: encodeVec(at(90)), secs: 30 });
+    r.add({ type: "speaker.name", spk: "c2", name: "Cy", by: "user" });
+    await r.settle();
+    expect(r.voices()).toEqual([]);
+    expect(Object.keys(await r.names())).toEqual(["Ben"]);
+    // The positive control: the same centroid with cons is named.
+    r.add(centroid("c1", at(2), 30));
+    await r.settle();
+    expect(r.voices()).toMatchObject([{ spk: "c1", name: "Ben", status: "named" }]);
+  });
+
+  test("the switch turned off while the file is read: nothing is written", async () => {
+    for (const flip of [true, false]) {
+      let r: Rig | null = null;
+      class Flipping extends VoiceStore {
+        override async load(model: string, dim: number) {
+          // The switch goes off while the file is read, after the step began.
+          if (flip && r) r.enabled = false;
+          return super.load(model, dim);
+        }
+      }
+      r = rig(T, (path) => new Flipping(path, { now: () => T0, log: () => {} }));
+      await seed(r, [person("Ben", [at(0)])]);
+      r.speakers("c1");
+      r.add(centroid("c1", at(2), 30));
+      await r.settle();
+      // The positive control: left on, the label is named.
+      expect(r.voices()).toHaveLength(flip ? 0 : 1);
+    }
+  });
+
+  test("[VO-5] a label merged into another loses its exemplar; unmerged, it teaches again", async () => {
+    const r = rig();
+    r.speakers("c1", "c2");
+    r.add(centroid("c1", at(0), 30));
+    r.add(centroid("c2", at(90), 30));
+    r.add({ type: "speaker.name", spk: "c1", name: "Ben", by: "user" });
+    r.add({ type: "speaker.name", spk: "c2", name: "Cy", by: "user" });
+    await r.settle();
+    // The positive control: before the merge, each name holds its own label's voice.
+    expect(await r.names()).toEqual({ Ben: [`${CALL}/c1`], Cy: [`${CALL}/c2`] });
+    r.add({ type: "speaker.merge", from: "c2", into: "c1" });
+    await r.settle();
+    expect(await r.names()).toEqual({ Ben: [`${CALL}/c1`] });
+    // A merge drops the exemplar even with the switch off: it only ever removes a wrong voice.
+    r.add({ type: "speaker.unmerge", from: "c2", into: "c1" });
+    r.add(centroid("c2", at(90), 40));
+    await r.settle();
+    expect(await r.names()).toEqual({ Ben: [`${CALL}/c1`], Cy: [`${CALL}/c2`] });
+  });
+
+  test("a typed name takes its person off another label that shows it by voice, at once", async () => {
+    for (const typed of ["Ben", "Bo"]) {
+      const r = rig();
+      await seed(r, [person("Ben", [at(0)])]);
+      r.speakers("c1", "c2");
+      r.add(centroid("c1", at(2), 30));
+      await r.settle();
+      expect(r.view.speakerLabel("c1")).toBe("Ben");
+      r.add({ type: "speaker.name", spk: "c2", name: typed, by: "user" });
+      await r.settle();
+      if (typed === "Ben") {
+        expect(r.voices().at(-1)).toMatchObject({
+          spk: "c1",
+          name: "Ben",
+          status: "refused",
+          by: "app",
+        });
+        expect(r.view.speakerLabel("c1")).toBe("Speaker 1");
+      } else {
+        // The positive control: another name leaves c1 as it was.
+        expect(r.voices()).toHaveLength(1);
+        expect(r.view.speakerLabel("c1")).toBe("Ben");
+      }
+    }
+  });
+});
+
+describe("[VO-4] a purge the file cannot take now", () => {
+  const ex = (call: string) => ({
+    model: MODEL,
+    dim: 4,
+    vec: at(0),
+    secs: 30,
+    cons: 0.8,
+    call,
+    spk: "c1",
+    at: "2026-09-01T10:00:00.000Z",
+  });
+
+  test("waits beside the file and leaves it once it reads again, after a restart too", async () => {
+    const d = tempDir("akou-voices-purge-");
+    dirs.push(d);
+    const store = new VoiceStore(join(d.dir, "voices.yaml"), { now: () => T0, log: () => {} });
+    await store.upsert("Ben", ex("deleted"));
+    await store.upsert("Ben", ex("kept"));
+    const good = readFileSync(store.path, "utf8");
+    // The positive control: a purge the file can take leaves at once, and nothing waits.
+    const p0 = new VoicePurge(store, () => {});
+    p0.purged("nothing-taught");
+    await p0.idle();
+    expect(existsSync(p0.file)).toBe(false);
+    // The file cannot be read when the call is deleted.
+    writeFileSync(store.path, "version: 1\npeople: [");
+    const p1 = new VoicePurge(store, () => {});
+    p1.purged("deleted");
+    await p1.idle();
+    expect(readFileSync(p1.file, "utf8")).toBe("deleted\n");
+    // Repaired by hand, then akou starts again: the call's voiceprints leave the file.
+    writeFileSync(store.path, good);
+    const p2 = new VoicePurge(store, () => {});
+    await p2.idle();
+    const ben = (await store.load(MODEL, 4)).people[0];
+    expect(ben?.exemplars.map((e) => e.call)).toEqual(["kept"]);
+    expect(existsSync(p2.file)).toBe(false);
+    // Repaired while akou runs: the next step that reads the file applies the purge.
+    const now = readFileSync(store.path, "utf8");
+    writeFileSync(store.path, "version: 1\npeople: [");
+    p2.purged("kept");
+    await p2.idle();
+    expect(readFileSync(p2.file, "utf8")).toBe("kept\n");
+    writeFileSync(store.path, now);
+    await p2.flush();
+    expect((await store.load(MODEL, 4)).people).toEqual([]);
+    expect(existsSync(p2.file)).toBe(false);
+  });
+
+  test("a call whose folder could not be deleted keeps its voiceprints (POSIX)", async () => {
+    // A folder in a trash folder without write access cannot be removed.
+    if (process.platform === "win32") return;
+    const d = tempDir("akou-voices-trash-");
+    dirs.push(d);
+    const ws = join(d.dir, TRASH_DIR, "work");
+    const dir = join(ws, "call-a");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "events.jsonl"), "");
+    writeFileSync(`${dir}.json`, JSON.stringify({ id: "A", workspace: "work", trashedAt: 1 }));
+    const purged: string[] = [];
+    const mgr = new CallManager({
+      root: d.dir,
+      engine: {} as CaptureEngine,
+      onPurged: (id) => purged.push(id),
+    });
+    chmodSync(ws, 0o555);
+    try {
+      expect(await mgr.emptyTrash()).toBe(existsSync(dir) ? 0 : 1);
+      // A box that ignores the mode (a root shell) deletes it: then the call is purged.
+      expect(purged).toEqual(existsSync(dir) ? [] : ["A"]);
+    } finally {
+      chmodSync(ws, 0o755);
+    }
+    // The positive control: once the folder can go, the call is purged.
+    const left = purged.length === 0 ? 1 : 0;
+    expect(await mgr.emptyTrash()).toBe(left);
+    expect(purged).toEqual(["A"]);
   });
 });

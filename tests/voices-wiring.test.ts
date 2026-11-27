@@ -6,12 +6,20 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { LogEvent } from "../src/core/log/events.ts";
 import { encodeVec } from "../src/main/asr/speakers.ts";
+import { TRASH_DAYS, TRASH_DIR } from "../src/main/call/manager.ts";
+import { ApiClient } from "../src/main/cli/client.ts";
 import { LIVE_EMBEDDER } from "../src/main/voices/host.ts";
 import { VoiceStore, voicesPath } from "../src/main/voices/store.ts";
 import type { VoiceThresholds } from "../src/main/voices/thresholds.ts";
 import { type AppRig, appRig } from "./api-helpers.ts";
+import { until } from "./capture-helpers.ts";
+import { cli } from "./cli-helpers.ts";
+import { tempDir } from "./helpers.ts";
+import { mcpClient } from "./mcp-helpers.ts";
 
 const LONG = 30_000;
 const T: VoiceThresholds = {
@@ -30,6 +38,17 @@ function at(deg: number): Float32Array {
 }
 
 const store = (rig: AppRig) => new VoiceStore(voicesPath(rig.app.configDir), { log: () => {} });
+
+const exemplar = (call: string, vec: Float32Array) => ({
+  model: LIVE_EMBEDDER,
+  dim: 4,
+  vec,
+  secs: 60,
+  cons: 0.8,
+  call,
+  spk: "c1",
+  at: new Date().toISOString(),
+});
 
 async function people(rig: AppRig): Promise<Record<string, string[]>> {
   const out: Record<string, string[]> = {};
@@ -59,25 +78,33 @@ async function name(rig: AppRig, id: string, spk: string, n: string, client: str
   expect(r.status).toBe(200);
 }
 
-describe("voices in the app", () => {
-  let rig: AppRig;
-  beforeAll(async () => {
-    rig = await appRig({ voiceThresholds: () => T });
-    await store(rig).upsert("Ben", {
-      model: LIVE_EMBEDDER,
-      dim: 4,
-      vec: at(0),
-      secs: 60,
-      cons: 0.8,
-      call: "earlier",
-      spk: "c1",
-      at: new Date().toISOString(),
-    });
-  }, LONG);
-  afterAll(async () => {
-    await rig?.close();
-  }, LONG);
+let rig: AppRig;
+let net: string;
+let admin: string;
+beforeAll(async () => {
+  rig = await appRig({
+    voiceThresholds: () => T,
+    settings: { "network.enabled": true, "network.bind": "127.0.0.1", "network.port": 0 },
+  });
+  net = rig.app.network?.url as string;
+  const k = await cli({ ...process.env, ...rig.env }, [
+    "keys",
+    "create",
+    "--name",
+    "laptop",
+    "--scope",
+    "admin",
+    "--json",
+  ]);
+  expect(k.code).toBe(0);
+  admin = k.json.key as string;
+  await store(rig).upsert("Ben", exemplar("earlier", at(0)));
+}, LONG);
+afterAll(async () => {
+  await rig?.close();
+}, LONG);
 
+describe("voices in the app", () => {
   test(
     "a fake call through app.watch: a known voice is named, a CLI name teaches, an MCP name does not",
     async () => {
@@ -119,6 +146,57 @@ describe("voices in the app", () => {
   );
 });
 
+describe("[VO-5] only the app's own token is the CLI", () => {
+  test(
+    "an admin key and an MCP client that send cli teach nothing; the app's token sending cli does",
+    async () => {
+      const id = await rig.startCall();
+      try {
+        await centroid(rig, id, "c8", at(90), 30);
+        await centroid(rig, id, "c9", at(-90), 30);
+        await centroid(rig, id, "c10", at(180), 30);
+        // An admin key on the network listener claims to be the CLI.
+        const res = await fetch(`${net}/calls/${id}/speakers`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${admin}`,
+            "content-type": "application/json",
+            "x-akou-client": "cli",
+          },
+          body: JSON.stringify({ spk: "c8", name: "Eve" }),
+        });
+        expect(res.status).toBe(200);
+        // An MCP client that names itself cli, on the app's own token.
+        const mcp = await mcpClient(
+          new ApiClient({ env: { ...process.env, ...rig.env }, client: "mcp", launch: null }),
+          "cli",
+        );
+        try {
+          const r = await mcp.call("akou_name_speaker", { speaker: "c9", name: "Fay" });
+          expect(r.isError).toBe(false);
+        } finally {
+          await mcp.close();
+        }
+        // The positive control: the app's own token sending cli is the CLI, and teaches.
+        await name(rig, id, "c10", "Gus", "cli");
+        await rig.app.voices?.idle();
+        const by = (await rig.app.events(id, 0))
+          .filter((e) => e.type === "speaker.name")
+          .map((e) => [(e as { spk: string }).spk, (e as { by: string }).by]);
+        expect(by).toEqual([
+          ["c8", "agent:api"],
+          ["c9", "agent:mcp"],
+          ["c10", "agent:cli"],
+        ]);
+        expect(Object.keys(await people(rig)).sort()).toEqual(["Ben", "Gus"]);
+      } finally {
+        await rig.api("POST", "/calls/live/stop");
+      }
+    },
+    LONG,
+  );
+});
+
 describe("[VO-8] server mode", () => {
   test(
     "has no voices Host, so nothing learns or matches",
@@ -135,6 +213,44 @@ describe("[VO-8] server mode", () => {
       } finally {
         await server.close();
         await app.close();
+      }
+    },
+    LONG,
+  );
+
+  test(
+    "[VO-4] the 30-day purge at start drops a deleted call's voiceprints there too",
+    async () => {
+      const home = tempDir("akou-app-");
+      const OLD = "01J8Z6Q4M2VX0K7B3D4E5OLDXX";
+      const dir = join(home.dir, "Recordings", "akou", TRASH_DIR, "work", "old-call");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "events.jsonl"), "");
+      writeFileSync(
+        `${dir}.json`,
+        JSON.stringify({
+          id: OLD,
+          workspace: "work",
+          // clock: a call trashed past the 30 days, on the real clock the app reads.
+          trashedAt: Date.now() - (TRASH_DAYS + 1) * 24 * 3600_000,
+        }),
+      );
+      const s = new VoiceStore(voicesPath(join(home.dir, ".config", "akou")), { log: () => {} });
+      await s.upsert("Ben", exemplar(OLD, at(0)));
+      await s.upsert("Ben", exemplar("kept", at(1)));
+      const server = await appRig({
+        home: home.dir,
+        settings: { "server.enabled": true, "api.bind": "127.0.0.1" },
+      });
+      try {
+        await until(() => !existsSync(dir), 10_000, "the old call to be purged");
+        await server.app.voicePurge.idle();
+        // The positive control: what another call taught stays.
+        const ben = (await s.load(LIVE_EMBEDDER, 4)).people[0];
+        expect(ben?.exemplars.map((e) => e.call)).toEqual(["kept"]);
+      } finally {
+        await server.close();
+        home.cleanup();
       }
     },
     LONG,

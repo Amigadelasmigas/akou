@@ -279,7 +279,7 @@ import {
   type VocabFile,
   vocabPaths,
 } from "./vocab/files.ts";
-import { type VoiceCall, VoiceHost } from "./voices/host.ts";
+import { type VoiceCall, VoiceHost, VoicePurge } from "./voices/host.ts";
 import { VoiceStore, voicesPath } from "./voices/store.ts";
 import { thresholdsFor, type VoiceThresholds } from "./voices/thresholds.ts";
 import { appBundle, relaunchCommand, startWatchdog, type Watchdog } from "./watchdog.ts";
@@ -797,6 +797,8 @@ export class AkouApp implements ApiApp {
   private accelProbe: Probe | null = null;
   /** Voices across calls (`src/main/voices/host.ts`); null in server mode, which never has them. */
   readonly voices: VoiceHost | null;
+  /** A call deleted for good leaves the voices file, in every mode [VO-4]. */
+  readonly voicePurge: VoicePurge;
 
   constructor(
     private readonly o: AppOptions,
@@ -877,15 +879,18 @@ export class AkouApp implements ApiApp {
       },
       beforeEnd: (id) => this.asr?.flush(id) ?? Promise.resolve(),
       onOpen: (c) => void this.readyRead(c),
-      onPurged: (id) => this.voices?.purged(id),
+      onPurged: (id) => this.voicePurge.purged(id),
     });
+    const voiceStore = new VoiceStore(voicesPath(this.configDir), {
+      now: () => this.clock.now(),
+      log: (m) => this.log("info", m),
+    });
+    this.voicePurge = new VoicePurge(voiceStore, (level, m) => this.log(level, m));
     this.voices =
       this.runMode === "app"
         ? new VoiceHost({
-            store: new VoiceStore(voicesPath(this.configDir), {
-              now: () => this.clock.now(),
-              log: (m) => this.log("info", m),
-            }),
+            store: voiceStore,
+            purge: this.voicePurge,
             enabled: () => this.cfg.settings["voices.enabled"],
             thresholds: o.voiceThresholds ?? ((model) => thresholdsFor(model)),
             call: (id) => this.voiceCall(id),
@@ -4648,7 +4653,7 @@ export class AkouApp implements ApiApp {
       await this.quitStep("the live Qwen server", () => liveQwen?.server.stop());
       await this.quitStep("the live recognizer", () => this.asr?.close());
       // After the recognizer: no centroid is left to learn from or match.
-      await this.quitStep("the voices file", () => this.voices?.idle());
+      await this.quitStep("the voices file", () => this.voices?.idle() ?? this.voicePurge.idle());
       await this.quitStep("the page server", () => this.page?.stop());
       // Before the API server: no Wyoming session holds the store when the job service closes.
       await this.quitStep("the Wyoming listener", () => this.wyoming?.stop());
