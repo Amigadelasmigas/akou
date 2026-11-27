@@ -92,6 +92,17 @@ export interface PassResult extends CheckedPass {
   drafts: EventDraft[];
 }
 
+/**
+ * The call's names the pass treats as known terms: typed speaker names and the user. A name akou
+ * found by voice stays out, so a wrong guess never corrects the text [VO-7].
+ */
+export function passNames(view: CallView): string[] {
+  const names: string[] = [];
+  for (const r of view.roster()) if (r.name && !r.byVoice) names.push(r.name);
+  if (view.call?.user) names.push(view.call.user);
+  return names;
+}
+
 /** The lines the pass reads: the `best` layer, echo left out. */
 export function passLines(view: CallView): Line[] {
   return view.lines("best");

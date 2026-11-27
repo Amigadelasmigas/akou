@@ -636,9 +636,17 @@ describe("the fold: names found by voice", () => {
     v.apply(b.add({ type: "speaker.name", spk: "c2", name: "Ben", by: "user" }));
     expect(row("c2")).toMatchObject({ name: "Ben", namedBy: "user", voice: { name: "Bea" } });
     expect(row("c2")?.byVoice).toBeUndefined();
-    // A voice event re-renders every line, as a name does.
+    // A voice event re-renders every line, as a name does: warm the cache first, then match.
+    expect(v.resolve("l000002")?.speaker).toBe("Speaker 1");
+    const cursor = v.changesSince(0).cursor;
     v.apply(b.add(voice("c1", "Cleo", "named", 0.85)));
+    expect(v.changesSince(cursor).all).toBe(true);
     expect(v.resolve("l000002")?.speaker).toBe("Cleo");
+    // A refusal re-renders too, with the cache warm on the voice name.
+    const before = v.changesSince(0).cursor;
+    v.apply(b.add(voice("c1", "Cleo", "refused")));
+    expect(v.changesSince(before).all).toBe(true);
+    expect(v.resolve("l000002")?.speaker).toBe("Speaker 1");
   });
 
   test("[VO-7] a name found by voice never enters the read-time rules or the decode list", () => {
