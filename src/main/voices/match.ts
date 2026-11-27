@@ -68,7 +68,8 @@ export function rankPeople(
     let s = top;
     if (mode === "mean") {
       const sum = new Float32Array(dim);
-      for (const e of ex) for (let i = 0; i < dim; i++) sum[i] = (sum[i] as number) + (e[i] as number);
+      for (const e of ex)
+        for (let i = 0; i < dim; i++) sum[i] = (sum[i] as number) + (e[i] as number);
       const m = cosine(v, sum);
       if (m === null) continue;
       s = m;
@@ -100,8 +101,8 @@ export type Fresh =
   | { kind: "name"; name: string; score: number }
   | { kind: "offer"; name: string; score: number };
 
-/** `withdraw`: write `refused` (by the app) for `name`, then act on `then`. */
-export type Decision = Fresh | { kind: "withdraw"; name: string; then: Fresh };
+/** `withdraw`: write `refused` (by the app) for `name`, then act on `next`. */
+export type Decision = Fresh | { kind: "withdraw"; name: string; next: Fresh };
 
 const NONE: Fresh = { kind: "none" };
 
@@ -148,7 +149,7 @@ export function decideRanked(
     return {
       kind: "withdraw",
       name: cur.name,
-      then: fresh(
+      next: fresh(
         open.filter((c) => c.name !== cur.name),
         t,
       ),

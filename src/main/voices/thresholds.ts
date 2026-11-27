@@ -42,8 +42,7 @@ export const NO_THRESHOLDS: Readonly<VoiceThresholds> = Object.freeze({
   score: "best",
 });
 
-const num = (v: unknown): number | null =>
-  typeof v === "number" && Number.isFinite(v) ? v : null;
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /** The thresholds for the embedder `model`, from `table` (the gate file unless a test passes one). */
 export function thresholdsFor(model: string, table: unknown = gate): VoiceThresholds {

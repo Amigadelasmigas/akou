@@ -220,7 +220,8 @@ export interface Ranked {
 function writesAt(snaps: readonly Ranked[], minMatch: number): Ranked[] {
   return snaps.filter(
     (s) =>
-      s.secs >= minMatch && (s.min === undefined || s.min === minMatch || s.min === FIRST_MATCH_SEC),
+      s.secs >= minMatch &&
+      (s.min === undefined || s.min === minMatch || s.min === FIRST_MATCH_SEC),
   );
 }
 
@@ -295,7 +296,7 @@ export function simulate(
       (refused[i] as Set<string>).add(d.name);
       o.final = null;
       o.withdrawn++;
-      d = d.then;
+      d = d.next;
     }
     if (d.kind === "name") {
       o.final = { name: d.name, status: "named" };

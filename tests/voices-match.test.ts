@@ -176,7 +176,7 @@ describe("traps", () => {
     expect(run(forgotten, at(0), { voice: { name: "Ana", status: "named" } })).toEqual({
       kind: "withdraw",
       name: "Ana",
-      then: { kind: "none" },
+      next: { kind: "none" },
     });
     // The positive control: before the forget the same voice is Ana, and the name stays.
     expect(run(store, at(0))).toMatchObject({ kind: "name", name: "Ana" });
@@ -209,13 +209,13 @@ describe("traps", () => {
     expect(run([ANA, BO], at(85), named)).toEqual({
       kind: "withdraw",
       name: "Ana",
-      then: expect.objectContaining({ kind: "name", name: "Bo" }) as never,
+      next: expect.objectContaining({ kind: "name", name: "Bo" }) as never,
     });
     // Ana fell under OFFER (cos 60 = 0.5) with nobody else close: withdrawn, nothing in her place.
     expect(run([ANA, BO], off(60), named)).toEqual({
       kind: "withdraw",
       name: "Ana",
-      then: { kind: "none" },
+      next: { kind: "none" },
     });
     // Under ACCEPT but over OFFER (0.71) and nobody else named: the name stays.
     expect(run([ANA, BO], off(45), named)).toEqual({ kind: "none" });

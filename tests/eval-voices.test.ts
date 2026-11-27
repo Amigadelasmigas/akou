@@ -76,7 +76,9 @@ function corpus(o: {
   const learn: VoiceLabel[] = [];
   for (let c = 0; c < o.calls; c++)
     o.bases.forEach((b, i) => {
-      learn.push(label(`${o.prefix ?? "call"}${c}`, o.names?.[i] ?? `p${i}`, lines(b, o.spread, r), c));
+      learn.push(
+        label(`${o.prefix ?? "call"}${c}`, o.names?.[i] ?? `p${i}`, lines(b, o.spread, r), c),
+      );
     });
   return { learn };
 }
@@ -229,7 +231,7 @@ describe("akou's matcher in time order", () => {
     const writes = [
       w(10, [cand("Ana", 0.8, 0), cand("Bo", 0.1, 1)]),
       w(300, [cand("Bo", 0.85, 1), cand("Ana", 0.3, 0)]),
-      w(600, [cand("Ana", 0.9, 0), cand("Bo", 0.2, 1)]),
+      w(600, [cand("Ana", 0.9, 0), cand("Bo", 0.7, 1)]),
     ];
     const [o] = simulate([writes], T);
     expect(o?.named).toEqual(new Set(["Ana", "Bo"]));
@@ -253,7 +255,12 @@ describe("akou's matcher in time order", () => {
     const b = new LabelBuilder();
     const r = rng(2);
     const base = voice(r);
-    for (let k = 1; k <= 12; k++) b.add(base.map((x) => x + 0.1 * r()), 6, k * 60);
+    for (let k = 1; k <= 12; k++)
+      b.add(
+        base.map((x) => x + 0.1 * r()),
+        6,
+        k * 60,
+      );
     const snaps = (b.label("c", "p") as VoiceLabel).snaps ?? [];
     expect(snaps.map((s) => [s.t, Math.round(s.secs), s.min ?? 0])).toEqual([
       [120, 12, 10],

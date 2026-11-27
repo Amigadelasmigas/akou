@@ -346,14 +346,11 @@ export function unnamedLabels(events: readonly LogEvent[]): Set<string> {
     events.filter((e) => e.type === "speaker.name").map((e) => (e as { spk: string }).spk),
   );
   const out = new Set<string>();
-  for (const e of events)
-    if (
-      e.type === "seg" &&
-      /^c\d+$/.test(e.spk) &&
-      !named.has(e.spk) &&
-      view.resolveSpeaker(e.spk) === e.spk
-    )
-      out.add(e.spk);
+  for (const e of events) {
+    const spk = e.type === "seg" ? e.spk : undefined;
+    if (spk && /^c\d+$/.test(spk) && !named.has(spk) && view.resolveSpeaker(spk) === spk)
+      out.add(spk);
+  }
   return out;
 }
 
