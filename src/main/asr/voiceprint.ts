@@ -87,6 +87,57 @@ export class Accum {
     return true;
   }
 
+  /**
+   * An accumulator that goes on from a voiceprint written earlier (`vec` its mean embedding,
+   * `secs` and `cons` as written), counted as `n` embeddings that all leaned `cons` toward `vec`.
+   * A zero `vec` or an `n` under 1 gives an empty one that keeps only `secs`.
+   */
+  static resume(vec: Float32Array, secs: number, cons: number, n: number): Accum {
+    const a = new Accum();
+    a.seconds = secs;
+    const len = norm(vec);
+    if (len === 0 || n < 1) return a;
+    const c = Math.max(0, Math.min(1, cons));
+    a.sum = new Float32Array(vec.length);
+    a.nsum = new Float32Array(vec.length);
+    for (let i = 0; i < vec.length; i++) {
+      const x = vec[i] as number;
+      a.sum[i] = x * n;
+      a.nsum[i] = (x / len) * c * n;
+    }
+    a.count = n;
+    return a;
+  }
+
+  /** Adds everything `other` holds, as if its embeddings had been added here. Sizes must match. */
+  merge(other: Accum): void {
+    this.combine(other, 1);
+  }
+
+  /** Takes back what `merge(other)` added. */
+  unmerge(other: Accum): void {
+    this.combine(other, -1);
+  }
+
+  private combine(other: Accum, sign: 1 | -1): void {
+    if (this.sum && other.sum && this.sum.length !== other.sum.length)
+      throw new Error(`voiceprint of size ${other.sum.length} merged into ${this.sum.length}`);
+    this.seconds = Math.max(0, this.seconds + sign * other.seconds);
+    if (!other.sum || !other.nsum || other.count === 0) return;
+    this.sum ??= new Float32Array(other.sum.length);
+    this.nsum ??= new Float32Array(other.sum.length);
+    for (let i = 0; i < this.sum.length; i++) {
+      this.sum[i] = (this.sum[i] as number) + sign * (other.sum[i] as number);
+      this.nsum[i] = (this.nsum[i] as number) + sign * (other.nsum[i] as number);
+    }
+    this.count += sign * other.count;
+    if (this.count <= 0) {
+      this.sum = null;
+      this.nsum = null;
+      this.count = 0;
+    }
+  }
+
   get n(): number {
     return this.count;
   }

@@ -312,6 +312,8 @@ interface Pending {
   s1: number;
   /** For segments of `MIN_EMBED_SECONDS` or more. */
   emb: Float32Array | null;
+  /** The segment's length, seconds: the speech its embedding adds to the label's voiceprint. */
+  secs: number;
 }
 
 interface ChannelState {
@@ -948,6 +950,7 @@ export class LivePipeline {
         s0: range?.[0] ?? 0,
         s1: range?.[1] ?? 0,
         emb,
+        secs: a1 - a0,
       });
       this.drain(false);
       return key;
@@ -1102,7 +1105,7 @@ export class LivePipeline {
       }
       if (spk === null) break;
       this.pending.shift();
-      if (p.emb && spk !== "c?") this.speakers.addTo(spk, p.emb);
+      if (p.emb && spk !== "c?") this.speakers.addTo(spk, p.emb, p.secs);
       this.emit({ type: "label", key: p.key, spk });
       for (const c of this.speakers.centroids(this.now())) this.emit(c);
     }
@@ -1297,7 +1300,7 @@ export type ToWorker =
   | {
       type: "call";
       id: string;
-      centroids: { spk: string; vec: string }[];
+      centroids: { spk: string; vec: string; secs?: number; cons?: number }[];
       merges: { from: string; into: string }[];
       unmerged: { from: string; into: string }[];
       ids: string[];
@@ -2684,7 +2687,13 @@ export class LiveAsr {
         return;
       }
       case "centroid":
-        c?.access.record({ type: "speaker.centroid", spk: m.spk, vec: m.vec });
+        c?.access.record({
+          type: "speaker.centroid",
+          spk: m.spk,
+          vec: m.vec,
+          secs: m.secs,
+          cons: m.cons,
+        });
         return;
       case "merge":
         c?.access.record({ type: "speaker.merge", from: m.from, into: m.into });

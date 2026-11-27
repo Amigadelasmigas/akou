@@ -6,9 +6,11 @@
  * - On the call channel, a segment of at least 1 s gets an embedding. It joins the nearest cluster
  *   when the cosine similarity is at least 0.60, else it starts a new cluster `c<N>`. A shorter
  *   segment inherits the previous call speaker when the gap is under 1 s, else it is `c?`.
- * - Centroids go to the log (`speaker.centroid`) every five minutes and at each part end, and are
- *   restored from it, so `c2` in part 3 is the same voice as `c2` in part 1 and a name given to
- *   `c2` keeps rendering (names are `speaker.name` events; readers apply them).
+ * - Centroids go to the log (`speaker.centroid`) every five minutes, at each part end and once
+ *   when a cluster first holds `FIRST_MATCH_SEC` of speech, with its speech seconds (`secs`) and
+ *   how well its lines agree (`cons`, voiceprint.ts), and are restored from it, so `c2` in
+ *   part 3 is the same voice as `c2` in part 1 and a name given to `c2` keeps rendering (names
+ *   are `speaker.name` events; readers apply them).
  * - Two clusters whose centroids converge (similarity over 0.8) give one `speaker.merge`; the
  *   merged-away cluster stops taking segments. `speaker.unmerge` brings it back, and that pair is
  *   never merged automatically again. Neither touches a segment or runs the recognizer.
@@ -31,6 +33,7 @@
  */
 
 import type { DiarizedSpan, SpeakerTurn } from "./engine.ts";
+import { Accum } from "./voiceprint.ts";
 
 export const JOIN_SIMILARITY = 0.6;
 export const MERGE_SIMILARITY = 0.8;
@@ -40,6 +43,12 @@ export const CENTROID_EVERY_MS = 5 * 60_000;
 export const MAP_OVERLAP = 0.6;
 /** A centroid restored from the log counts as this many segments, so it does not swing at once. */
 const RESTORED_WEIGHT = 10;
+/**
+ * Seconds of speech after which a cluster's centroid is written at once, not at the next
+ * five-minute write, so a voice can be matched early. The real value comes from
+ * docs/gates/voices.json in a later change.
+ */
+export const FIRST_MATCH_SEC = 20;
 
 export function cosine(a: Float32Array, b: Float32Array): number {
   let dot = 0;
@@ -77,10 +86,22 @@ interface Cluster {
   dirty: boolean;
   /** Merged into another cluster: takes no segments. */
   mergedInto?: string;
+  /** Its voiceprint (speech seconds, consistency), merged and unmerged as `sum` is. */
+  acc: Accum;
+  /** Its speech already reached `FIRST_MATCH_SEC`, so that write is done. */
+  firstMatch: boolean;
 }
 
 export type SpeakerEvent =
-  | { type: "centroid"; spk: string; vec: string }
+  | {
+      type: "centroid";
+      spk: string;
+      vec: string;
+      /** Seconds of speech in the cluster, 1 decimal. */
+      secs: number;
+      /** How well its embeddings agree with their own direction, 0 to 1, 3 decimals. */
+      cons: number;
+    }
   | { type: "merge"; from: string; into: string };
 
 export class LiveSpeakers {
@@ -92,7 +113,7 @@ export class LiveSpeakers {
 
   /** Restores clusters from `speaker.centroid` events and the merge history of the call. */
   restore(state: {
-    centroids: readonly { spk: string; vec: string }[];
+    centroids: readonly { spk: string; vec: string; secs?: number; cons?: number }[];
     merges?: readonly { from: string; into: string }[];
     unmerged?: readonly { from: string; into: string }[];
   }): void {
@@ -100,7 +121,20 @@ export class LiveSpeakers {
       const vec = decodeVec(c.vec);
       const sum = new Float32Array(vec.length);
       for (let i = 0; i < vec.length; i++) sum[i] = (vec[i] as number) * RESTORED_WEIGHT;
-      this.clusters.set(c.spk, { id: c.spk, n: RESTORED_WEIGHT, sum, dirty: false });
+      // An event written without `cons` says nothing about agreement: its voiceprint starts empty,
+      // so `cons` counts only the lines heard from here on.
+      const acc =
+        c.cons === undefined
+          ? Accum.resume(vec, c.secs ?? 0, 0, 0)
+          : Accum.resume(vec, c.secs ?? 0, c.cons, RESTORED_WEIGHT);
+      this.clusters.set(c.spk, {
+        id: c.spk,
+        n: RESTORED_WEIGHT,
+        sum,
+        dirty: false,
+        acc,
+        firstMatch: acc.secs >= FIRST_MATCH_SEC,
+      });
       const m = /^c(\d+)$/.exec(c.spk);
       if (m) this.next = Math.max(this.next, Number(m[1]) + 1);
     }
@@ -111,11 +145,14 @@ export class LiveSpeakers {
     for (const u of state.unmerged ?? []) this.unmerge(u.from, u.into);
   }
 
-  /** Adds an embedding to the cluster `spk`, creating it (labels chosen by a stream diarizer). */
-  addTo(spk: string, embedding: Float32Array): void {
+  /**
+   * Adds an embedding of `secs` seconds of speech to the cluster `spk`, creating it (labels chosen
+   * by a stream diarizer).
+   */
+  addTo(spk: string, embedding: Float32Array, secs: number): void {
     const c = this.clusters.get(spk);
     if (!c) {
-      this.clusters.set(spk, { id: spk, n: 1, sum: Float32Array.from(embedding), dirty: true });
+      this.clusters.set(spk, newCluster(spk, embedding, secs));
       this.noteId(spk);
       return;
     }
@@ -123,6 +160,7 @@ export class LiveSpeakers {
       c.sum[i] = (c.sum[i] as number) + (embedding[i] as number);
     c.n++;
     c.dirty = true;
+    feed(c, embedding, secs);
   }
 
   /** The active cluster nearest `embedding` at `JOIN_SIMILARITY` or more, `exclude` left out. */
@@ -182,10 +220,11 @@ export class LiveSpeakers {
           best.sum[i] = (best.sum[i] as number) + (embedding[i] as number);
         best.n++;
         best.dirty = true;
+        feed(best, embedding, a1 - a0);
         spk = best.id;
       } else {
         spk = `c${this.next++}`;
-        this.clusters.set(spk, { id: spk, n: 1, sum: Float32Array.from(embedding), dirty: true });
+        this.clusters.set(spk, newCluster(spk, embedding, a1 - a0));
       }
     } else if (this.last && this.last.part === part && a0 - this.last.a1 < INHERIT_GAP_SECONDS) {
       spk = this.last.spk;
@@ -212,6 +251,7 @@ export class LiveSpeakers {
             into.sum[k] = (into.sum[k] as number) + (from.sum[k] as number);
           into.n += from.n;
           into.dirty = true;
+          sameSize(() => into.acc.merge(from.acc));
           out.push({ type: "merge", from: from.id, into: into.id });
         }
       }
@@ -230,19 +270,32 @@ export class LiveSpeakers {
         for (let k = 0; k < t.sum.length; k++)
           t.sum[k] = (t.sum[k] as number) - (f.sum[k] as number);
         t.n -= f.n;
+        sameSize(() => t.acc.unmerge(f.acc));
       }
     }
   }
 
-  /** Centroids to write: every `CENTROID_EVERY_MS`, or all changed ones when `force` (part end). */
+  /**
+   * Centroids to write: every `CENTROID_EVERY_MS`, or all changed ones when `force` (part end).
+   * In between, a cluster whose speech first reaches `FIRST_MATCH_SEC` is written at once, alone.
+   */
   centroids(nowMs: number, force = false): SpeakerEvent[] {
-    if (!force && nowMs - this.lastWrite < CENTROID_EVERY_MS) return [];
-    this.lastWrite = nowMs;
+    const due = force || nowMs - this.lastWrite >= CENTROID_EVERY_MS;
+    if (due) this.lastWrite = nowMs;
     const out: SpeakerEvent[] = [];
     for (const c of this.clusters.values()) {
       if (!c.dirty) continue;
+      const reached = !c.firstMatch && c.acc.secs >= FIRST_MATCH_SEC;
+      if (!due && !reached) continue;
+      if (c.acc.secs >= FIRST_MATCH_SEC) c.firstMatch = true;
       c.dirty = false;
-      out.push({ type: "centroid", spk: c.id, vec: encodeVec(this.centroid(c)) });
+      out.push({
+        type: "centroid",
+        spk: c.id,
+        vec: encodeVec(this.centroid(c)),
+        secs: Math.round(c.acc.secs * 10) / 10,
+        cons: round3(c.acc.result()?.cons ?? 0),
+      });
     }
     return out;
   }
@@ -351,6 +404,37 @@ export function smoothTurns(
     for (const s of joined) if (s.end - s.start >= minOn) out.push(s);
   }
   return out.sort((a, b) => a.start - b.start || a.speaker - b.speaker);
+}
+
+function newCluster(id: string, embedding: Float32Array, secs: number): Cluster {
+  const acc = new Accum();
+  const c: Cluster = {
+    id,
+    n: 1,
+    sum: Float32Array.from(embedding),
+    dirty: true,
+    acc,
+    firstMatch: false,
+  };
+  feed(c, embedding, secs);
+  return c;
+}
+
+/** Adds a line to a cluster's voiceprint. Labels and the centroid never depend on it. */
+function feed(c: Cluster, embedding: Float32Array, secs: number): void {
+  sameSize(() => c.acc.add(embedding, secs));
+}
+
+/**
+ * Runs a voiceprint step that throws on vectors of two sizes (a centroid restored from a part
+ * made with another speaker model). The step is skipped: the clustering must go on as before.
+ */
+function sameSize(step: () => unknown): void {
+  try {
+    step();
+  } catch {
+    // Its speech and consistency stop growing; the centroid itself is unaffected.
+  }
 }
 
 function idNum(spk: string): number {

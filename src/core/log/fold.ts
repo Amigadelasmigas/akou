@@ -409,6 +409,8 @@ export class CallView {
   private readonly finalMap = new Map<string, SpeakerMap>();
   private readonly suggestions = new Map<string, SpeakerSuggest>();
   private readonly centroids = new Map<string, string>();
+  /** The `secs` and `cons` of each label's latest centroid, when it carried them. */
+  private readonly centroidStats = new Map<string, { secs?: number; cons?: number }>();
   /** Every `speaker.unmerge` pair, `from>into`: the live clusterer never merges these again. */
   private readonly unmerges = new Set<string>();
 
@@ -585,6 +587,10 @@ export class CallView {
         break;
       case "speaker.centroid":
         this.centroids.set(e.spk, e.vec);
+        this.centroidStats.set(e.spk, {
+          ...(e.secs !== undefined ? { secs: e.secs } : {}),
+          ...(e.cons !== undefined ? { cons: e.cons } : {}),
+        });
         break;
       case "speaker.merge":
         if (e.from !== e.into) this.merges.set(e.from, e.into);
@@ -1127,7 +1133,7 @@ export class CallView {
    * force and every pair ever unmerged.
    */
   speakerState(): {
-    centroids: { spk: string; vec: string }[];
+    centroids: { spk: string; vec: string; secs?: number; cons?: number }[];
     merges: { from: string; into: string }[];
     unmerged: { from: string; into: string }[];
   } {
@@ -1136,7 +1142,11 @@ export class CallView {
       return { from, into };
     };
     return {
-      centroids: [...this.centroids].map(([spk, vec]) => ({ spk, vec })),
+      centroids: [...this.centroids].map(([spk, vec]) => ({
+        spk,
+        vec,
+        ...this.centroidStats.get(spk),
+      })),
       merges: [...this.merges].map(([from, into]) => ({ from, into })),
       unmerged: [...this.unmerges].map(pair),
     };

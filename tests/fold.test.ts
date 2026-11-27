@@ -416,6 +416,20 @@ describe("the fold: parts and restarts", () => {
     ]);
     expect(v.centroid("c2")).toBe("AAAA");
   });
+
+  test("the restored speaker state carries each latest centroid's secs and cons, when it has them", () => {
+    const b = new LogBuilder();
+    b.created();
+    b.partStarted(1, T0);
+    b.add({ type: "speaker.centroid", spk: "c1", vec: "AAAA", secs: 12.5, cons: 0.91 });
+    b.add({ type: "speaker.centroid", spk: "c2", vec: "BBBB", secs: 3, cons: 0.5 });
+    // An older writer's centroid for c2 replaces the one before it, fields and all.
+    b.add({ type: "speaker.centroid", spk: "c2", vec: "CCCC" });
+    expect(fold(b.events).speakerState().centroids).toEqual([
+      { spk: "c1", vec: "AAAA", secs: 12.5, cons: 0.91 },
+      { spk: "c2", vec: "CCCC" },
+    ]);
+  });
 });
 
 describe("the fold: speakers", () => {
