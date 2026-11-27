@@ -15,6 +15,7 @@ import {
   type PassInput,
   parsePassAnswer,
   passBatches,
+  passNames,
   passPrompt,
   runPass,
   spanIn,
@@ -209,6 +210,41 @@ describe("[V6] the post-call pass", () => {
     expect(prompt).toContain("- Vercel (misheard as: vercell)");
     expect(prompt).toContain("Rejected, never propose: Vessel");
     expect(prompt).toContain("#l000001 15:36:13");
+  });
+
+  test("[VO-7] a name found by voice is not a known term, so its correction is only a proposal", () => {
+    const b = call();
+    b.seg({ id: "l000004", spk: "c2", text: "thanks siobahn", w0: T0 + 30 * S });
+    b.add({
+      type: "speaker.voice",
+      spk: "c2",
+      name: "Siobhan",
+      status: "named",
+      score: 0.9,
+      by: "app",
+    });
+    const answer = {
+      corrections: [{ line: "#l000004", heard: "siobahn", term: "Siobhan" }],
+      proposals: [],
+    };
+    const check = () => {
+      const view = fold(b.events);
+      const shown = new Map(view.lines("best").map((l) => [l.id, l]));
+      const known = passNames(view).map((term) => ({ term, heard: [] }));
+      return checkPass(answer, { shown, input: { known, rejected: [] }, existing: [] });
+    };
+    const guess = check();
+    expect(guess.corrections).toEqual([]);
+    expect(guess.proposals).toMatchObject([
+      { term: "Siobhan", why: "a correction to a term not in the vocabulary" },
+    ]);
+    // Positive control: the same name typed as a speaker.name is known and corrects the line.
+    b.add({ type: "speaker.name", spk: "c2", name: "Siobhan", by: "user" });
+    const typed = check();
+    expect(typed.corrections).toMatchObject([{ term: "Siobhan", heard: "siobahn" }]);
+    expect(typed.proposals.map((p) => p.why)).not.toContain(
+      "a correction to a term not in the vocabulary",
+    );
   });
 });
 

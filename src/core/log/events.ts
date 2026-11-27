@@ -183,6 +183,21 @@ export interface SpeakerName extends Envelope {
   by: Author;
 }
 
+/**
+ * A name akou found for a cluster by its voice, or the user's refusal of one. It never enters the
+ * decode list, and a `speaker.name` beats it in every order [VO-1] [VO-7].
+ */
+export interface SpeakerVoice extends Envelope {
+  type: "speaker.voice";
+  spk: string;
+  name: string;
+  /** `named`: shown as the name; `offered`: shown as a guess; `refused`: cancels that name. */
+  status: "named" | "offered" | "refused";
+  /** Match score, 0 to 1, rounded to 2 places. */
+  score?: number;
+  by: Author;
+}
+
 export interface SpeakerMap extends Envelope {
   type: "speaker.map";
   final: string;
@@ -447,6 +462,7 @@ export type LogEvent =
   | SpeakerMerge
   | SpeakerUnmerge
   | SpeakerName
+  | SpeakerVoice
   | SpeakerMap
   | SpeakerSuggest
   | Note
@@ -588,6 +604,13 @@ const SPECS: { [T in EventType]: Spec } = {
   "speaker.merge": { from: req("string"), into: req("string") },
   "speaker.unmerge": { from: req("string"), into: req("string") },
   "speaker.name": { spk: req("string"), name: req("string"), by: req("author") },
+  "speaker.voice": {
+    spk: req("string"),
+    name: req("string"),
+    status: req(["named", "offered", "refused"]),
+    score: opt("number"),
+    by: req("author"),
+  },
   "speaker.map": { final: req("string"), live: req("string"), overlap: req("number") },
   "speaker.suggest": { final: req("string"), live: req("string"), overlap: req("number") },
   note: {
