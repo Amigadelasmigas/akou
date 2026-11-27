@@ -30,6 +30,7 @@ import type { Line, View } from "../../../core/log/fold.ts";
 import { learnedItem } from "../../../core/vocab/learned.ts";
 import { renderTranscriptSection } from "../../handoff/export.ts";
 import { estimateTokens, renderLine } from "../../query/render.ts";
+import { isLocalUser } from "../caller.ts";
 import { errorsOf } from "../errors.ts";
 import { HttpError, json, type Query, type Router } from "../http.ts";
 import type { ApiApp } from "../server.ts";
@@ -356,7 +357,7 @@ const WAIT = {
 
 const TYPES = {
   type: "string",
-  doc: "Only these log event types, comma-separated (`health,seg,answer,share.started`). The cursor still moves past the others, so a reconnect does not replay them. Default: every type.",
+  doc: "Only these log event types, comma-separated (`health,seg,answer,share.started`). The cursor still moves past the others, so a reconnect does not replay them. Default: every type. An `ak_` key never reads `speaker.centroid`, even by name: it is skipped the way a filtered type is.",
 } as const;
 
 const EPHEMERAL = {
@@ -383,13 +384,26 @@ function typesParam(query: Query): ReadonlySet<string> | null {
   return new Set(types);
 }
 
+/**
+ * The types a caller reads ([VO-6]): a `speaker.centroid` holds a speaker's voice embedding, which
+ * stays with the user on this computer. The app's own token and the window read every type; an
+ * `ak_` key reads every other type, and the cursor still moves past the centroids it skips.
+ */
+function typesFor(
+  c: Parameters<typeof isLocalUser>[0],
+  types: ReadonlySet<string> | null,
+): ReadonlySet<string> | null {
+  if (isLocalUser(c)) return types;
+  return new Set([...(types ?? EVENT_TYPES)].filter((t) => t !== "speaker.centroid"));
+}
+
 export function followRoutes(r: Router<ApiApp>): void {
   r.add(
     "GET",
     "/calls/:id/events",
     {
       id: "calls.events",
-      doc: "The call's log events after a cursor, oldest first, each exactly once, with the next cursor. With `wait`, holds the request until an event arrives or the wait ends: a long poll. With `types`, only those events, and the wait lasts until one of them arrives; `cursor` still moves past the others.",
+      doc: "The call's log events after a cursor, oldest first, each exactly once, with the next cursor. With `wait`, holds the request until an event arrives or the wait ends: a long poll. With `types`, only those events, and the wait lasts until one of them arrives; `cursor` still moves past the others. An `ak_` key never reads `speaker.centroid` events: the cursor moves past them as past a filtered type.",
       access: "admin",
       modes: ["app"],
       params: { id: CALL_ID },
@@ -399,7 +413,8 @@ export function followRoutes(r: Router<ApiApp>): void {
     },
     async (c) => {
       const id = callId(c);
-      const types = typesParam(c.query);
+      const asked = typesParam(c.query);
+      const types = typesFor(c, asked);
       const wait = c.query.int("wait") as number;
       const until = performance.now() + wait * 1000;
       // The cursor moves past every event read, kept or not (PG-S2).
@@ -408,7 +423,7 @@ export function followRoutes(r: Router<ApiApp>): void {
       // An agent long-polling for `ask` is following this call's questions: the ask box sends
       // them to it first while the poll is open and for a short grace after (listeners.ts).
       const listening =
-        wait > 0 && types?.has("ask") && c.by.startsWith("agent:")
+        wait > 0 && asked?.has("ask") && c.by.startsWith("agent:")
           ? c.app.listeners?.open(id, c.by.slice("agent:".length))
           : undefined;
       try {
@@ -442,7 +457,7 @@ export function followRoutes(r: Router<ApiApp>): void {
     "/calls/:id/stream",
     {
       id: "calls.stream",
-      doc: "The call's log events after a cursor as server-sent events, then every new one as it is written, plus the line being spoken and the levels. A reconnecting client sends `Last-Event-ID` and resumes after it. `types` keeps only those events: one left out comes as its `id` alone, which moves `Last-Event-ID` and delivers nothing. `ephemeral=none` drops the spoken line, the levels and `read`.",
+      doc: "The call's log events after a cursor as server-sent events, then every new one as it is written, plus the line being spoken and the levels. A reconnecting client sends `Last-Event-ID` and resumes after it. `types` keeps only those events: one left out comes as its `id` alone, which moves `Last-Event-ID` and delivers nothing. `ephemeral=none` drops the spoken line, the levels and `read`. An `ak_` key never reads `speaker.centroid` events: each comes as its `id` alone, as a filtered type does.",
       access: "admin",
       modes: ["app"],
       params: { id: CALL_ID },
@@ -453,7 +468,7 @@ export function followRoutes(r: Router<ApiApp>): void {
     },
     async (c) => {
       const id = callId(c);
-      const types = typesParam(c.query);
+      const types = typesFor(c, typesParam(c.query));
       const ephemeral = c.query.oneOf<"all" | "none">("ephemeral") === "all";
       // A reconnecting client repeats the URL and names the last event it got: resume after that.
       const after = Math.max(c.query.int("after") as number, lastEventId(c.req));

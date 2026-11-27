@@ -2,6 +2,11 @@
 
 All notable changes to akou. Versions follow [semantic versioning](https://semver.org); the 0.x releases were prereleases, and from 1.0.0 on a release is a full release unless its version has a prerelease part, such as 1.1.0-rc.1.
 
+## Unreleased
+
+### Privacy
+- **An exported call log no longer carries voice embeddings.** The copy of `events.jsonl` in the export folder dropped nothing, so it held every `speaker.centroid` event, each a speaker's voice embedding. The export now leaves those lines out and keeps every other line as it was. An `ak_` key no longer reads them from `GET /calls/{id}/events` or `GET /calls/{id}/stream` either; the app itself still does ([TRAPS](docs/TRAPS.md) VO-6). A call exported by an earlier version keeps the embeddings in its exported `events.jsonl` until it is exported again: `akou export CALL` or `POST /calls/{id}/export` rewrites that log without them.
+
 ## 1.7.6 — the mark in the Mac menu bar is as large as its neighbours
 
 On a Mac, the akou mark in the menu bar was 10 pt tall, while the icons around it are about 14 pt. It is now 14 pt, with a slightly heavier stroke, and every straight edge still lands on a whole pixel, so it stays sharp on a Retina display. The item is still 32 pt wide. Windows, Linux and the recording icon are unchanged. This release also records a new reading of the Anthropic and OpenAI terms ([docs/providers.md](docs/providers.md#the-reading-of-2026-11-05)). The 8-hour soak did not run for this release: it exercises the call-recording helper, and nothing in this release touches it.
