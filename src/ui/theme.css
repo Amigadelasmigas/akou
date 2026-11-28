@@ -2886,6 +2886,56 @@ dialog {
   text-transform: none;
 }
 
+/* A name akou found by voice is a guess until someone confirms it: dashed like a live label, with
+   a voice mark after it. An offer keeps its `c3?` and adds the name it sounds like, muted. */
+.vmark {
+  width: 0.9em;
+  height: 0.9em;
+  margin-left: 0.3em;
+  vertical-align: -0.1em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.who .offer {
+  margin-left: 0.4em;
+  color: var(--dim);
+  font-weight: 400;
+  text-transform: none;
+}
+#people li.voice {
+  border-style: dashed;
+}
+/* The share viewer's chips do nothing, but they say who spoke: drawn at full strength, never
+   greyed like a disabled control. */
+.row .who:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.pop-voice {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line2);
+}
+.pop-voice p {
+  margin: 0;
+}
+.pop-voice .pop-note,
+p.pop-note {
+  color: var(--dim);
+}
+/* In light, --dim is 4.4:1 on the panel and 4.3:1 on the played line's fill. One shade darker
+   passes 4.5:1 on every surface an offer or a popover note sits on. */
+@media (prefers-color-scheme: light) {
+  .who .offer,
+  .pop-voice .pop-note,
+  p.pop-note {
+    color: #5c6169;
+  }
+}
+
 /* The line being played (W5.6): a neutral fill, never the accent. */
 .row.playing .body {
   background: color-mix(in srgb, var(--fg) 6%, transparent);
@@ -3648,6 +3698,14 @@ input.pg-radio:focus-visible {
 }
 .pg-btn.ghost {
   background: none;
+}
+/* The press that forgets or joins, once the first one asked (the Voices list). */
+#settings-voices .pg-btn.armed {
+  color: var(--rec);
+  border-color: var(--rec);
+}
+#settings-voices .voice-rename .pg-input {
+  width: 180px;
 }
 .pg-btn .ico {
   width: 12px;

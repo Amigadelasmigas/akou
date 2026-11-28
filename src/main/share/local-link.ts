@@ -27,6 +27,7 @@ import { tokenMatches } from "../api/guard.ts";
 import { HttpError } from "../api/http.ts";
 import { lastEventId } from "../api/routes/follow.ts";
 import type { CallController } from "../call/call.ts";
+import { type ShownVoice, shownVoices } from "../query/render.ts";
 import type { UiBundle } from "../window/bundle.ts";
 import { CSP } from "../window/page-server.ts";
 import {
@@ -73,7 +74,10 @@ export interface LocalLinkOptions {
   onError?: (err: unknown) => void;
 }
 
-/** One line as a viewer sees it: the corrected text only, never the raw recognition. */
+/**
+ * One line as a viewer sees it: the corrected text only, never the raw recognition. A name akou
+ * found by voice comes marked (`voice`), so a viewer never takes it for a name someone gave.
+ */
 export interface SharedLine {
   id: string;
   seq: number;
@@ -83,6 +87,7 @@ export interface SharedLine {
   speaker: string;
   time: string;
   text: string;
+  voice?: ShownVoice;
 }
 
 export interface SharedNote {
@@ -145,7 +150,7 @@ export function chooseBind(
 }
 
 /** The rendered, filtered view of one call that every viewer reads. */
-export function sharedLine(l: Line, tz: string): SharedLine {
+export function sharedLine(l: Line, tz: string, voice?: ShownVoice): SharedLine {
   return {
     id: l.id,
     seq: l.seq,
@@ -155,7 +160,20 @@ export function sharedLine(l: Line, tz: string): SharedLine {
     speaker: l.speaker,
     time: formatWall(l.w0, tz),
     text: l.text,
+    ...(voice ? { voice } : {}),
   };
+}
+
+/**
+ * The names found by voice a viewer sees, by speaker id: only names akou showed on a speaker,
+ * marked as found by voice. An offer is a guess the user never confirmed, and it never leaves the
+ * window: the viewer sees the speaker's own label.
+ */
+export function sharedVoices(v: CallView): Map<string, ShownVoice> {
+  const out = new Map<string, ShownVoice>();
+  for (const [spk, voice] of shownVoices(v.roster()))
+    if (voice.status === "named") out.set(spk, voice);
+  return out;
 }
 
 export function sharedNotes(v: CallView, tz: string): SharedNote[] {
@@ -361,9 +379,12 @@ export class LocalLink implements ShareTransport {
         let holding = true;
         let cursor = 0;
         const sent = new Map<string, string>();
-        const render = (l: Line) => sharedLine(l, tz);
+        // What akou found by voice, read again before each batch: a voice event renders every line.
+        let voices = sharedVoices(v);
+        const render = (l: Line) => sharedLine(l, tz, voices.get(l.spk));
         const snapshot = () => {
           sent.clear();
+          voices = sharedVoices(v);
           const lines = v.lines("best").map(render);
           for (const l of lines) sent.set(l.id, JSON.stringify(l));
           cursor = v.changesSince(Number.MAX_SAFE_INTEGER).cursor;
@@ -386,6 +407,7 @@ export class LocalLink implements ShareTransport {
         const delta = (seq: number) => {
           const ch = v.changesSince(cursor);
           cursor = ch.cursor;
+          if (ch.all) voices = sharedVoices(v);
           const ids = ch.all
             ? [...new Set([...sent.keys(), ...v.lines("best").map((l) => l.id)])]
             : ch.ids;
@@ -428,12 +450,14 @@ export class LocalLink implements ShareTransport {
         const tick = setInterval(() => {
           const p = v.provisional.current(app.now()).map((x) => {
             const spk = x.ch === "mic" ? "you" : (x.spk ?? "c?");
+            const voice = x.ch === "call" ? voices.get(v.resolveSpeaker(spk)) : undefined;
             return {
               ch: x.ch,
               spk,
               speaker: v.speakerLabel(spk),
               time: formatWall(x.w0, tz),
               text: x.text,
+              ...(voice ? { voice } : {}),
             };
           });
           const json = JSON.stringify(p);
@@ -472,7 +496,9 @@ export class LocalLink implements ShareTransport {
         try {
           if (resumeAfter > 0 && resumeAfter <= v.lastSeq) {
             // Resume: only what changed after the viewer's last event, unless a rename touched all.
-            const missed = await app.events(c.id, resumeAfter);
+            // An event that lands during the read is already in the view but maybe not in the
+            // read: it counts as missed too, or the cursor below moves past it unsent.
+            const missed = [...(await app.events(c.id, resumeAfter)), ...held];
             if (missed.some((e) => RENAMING.has(e.type))) snapshot();
             else {
               for (const [id, json] of v

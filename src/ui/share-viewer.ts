@@ -23,6 +23,14 @@ interface SharedLine {
   speaker: string;
   time: string;
   text: string;
+  /** A name akou found by voice, marked as in the window: not confirmed. Offers never come. */
+  voice?: SharedVoice;
+}
+
+/** The share sends only a name akou showed by voice, never an offer. */
+interface SharedVoice {
+  name: string;
+  status: "named";
 }
 
 interface SharedNote {
@@ -51,7 +59,13 @@ function put(line: SharedLine): void {
   const el = cur?.el ?? rowElement();
   fillRow(
     el,
-    { ...line, timeTitle: start !== null ? intoTheCall(line.w0, start) : undefined },
+    {
+      ...line,
+      timeTitle: start !== null ? intoTheCall(line.w0, start) : undefined,
+      // A name found by voice is drawn as the window draws it: dashed, with the voice mark.
+      provisional: line.voice !== undefined,
+      readOnly: true,
+    },
     hues.hue(line.spk),
   );
   el.querySelector(".who")?.setAttribute("disabled", "");
@@ -149,6 +163,7 @@ es.addEventListener("partial", (e) => {
     speaker: string;
     time: string;
     text: string;
+    voice?: SharedVoice;
   }[];
   const box = $("partial");
   replace(
@@ -165,6 +180,9 @@ es.addEventListener("partial", (e) => {
           speaker: p.speaker,
           text: p.text,
           ch: p.ch,
+          voice: p.voice,
+          provisional: p.voice !== undefined,
+          readOnly: true,
         },
         hues.hue(p.spk),
       );

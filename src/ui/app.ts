@@ -41,6 +41,7 @@ import {
   type CallSummary,
   callHeadMeta,
   callMeta,
+  callVoices,
   finalNote,
   formatDuration,
   groupCalls,
@@ -53,6 +54,7 @@ import {
   stateLabel,
   suggestReopen,
   talkTime,
+  voiceWords,
 } from "./model.ts";
 import { ModelsCard } from "./models-card.ts";
 import { ModelsPage } from "./models-page.ts";
@@ -64,7 +66,7 @@ import type { AppStatus, Levels, QuitQuestion, Reply, Transport } from "./protoc
 import { ReviewPane } from "./review.ts";
 import { SettingsPage } from "./settings-page.ts";
 import { SetupWizard } from "./setup-wizard.ts";
-import { jumpText, TranscriptPane } from "./transcript.ts";
+import { fillWho, jumpText, TranscriptPane } from "./transcript.ts";
 import { WorkspacePicker } from "./workspaces.ts";
 
 /** The answer of `POST /calls/{id}/fix`: what each changed word did, and how to take it back. */
@@ -321,6 +323,7 @@ class App {
     const openWords = () => void this.pages.show("dictation", WORDS);
     const settings = new SettingsPage(t, {
       workspaces: () => this.calls.map((c) => c.workspace),
+      call: (id) => this.calls.find((c) => c.id === id),
       openModels,
       openDictionary: openWords,
       runSetup,
@@ -505,7 +508,10 @@ class App {
           this.notepad.render();
           this.player.marks();
         }
-        if (speakers) this.askPane.speakersChanged();
+        if (speakers) {
+          this.askPane.speakersChanged();
+          this.refreshVoicePop();
+        }
         if (asked) this.askPane.restore();
         // The talk times follow the lines and the names, not the one-second tick.
         const lines = c.events.some((e) => e.type === "seg" || e.type.startsWith("final."));
@@ -752,6 +758,7 @@ class App {
               .map((s) => s.spk),
           ),
           finalDoneSeq: v.final.done?.seq,
+          voices: callVoices(v),
         })
       : [];
     const people = byId("people");
@@ -761,11 +768,27 @@ class App {
       ...totals.map((t) => {
         const dot = h("i", { attrs: { "aria-hidden": "true" } });
         dot.style.setProperty("--h", String(this.hues.hue(t.spk)));
+        const who = h("span", { class: "who" });
+        fillWho(who, t.label, t.voice);
+        // A name found by voice reads as one, unconfirmed; an offer says who it sounds like. A
+        // span may not carry an aria-label, so the words are text a screen reader reads, not drawn.
+        if (t.voice) {
+          who.querySelector(".offer")?.setAttribute("aria-hidden", "true");
+          who.append(
+            h(
+              "span",
+              { class: "vh" },
+              t.voice.status === "named"
+                ? ", recognised by voice, not confirmed"
+                : `, ${voiceWords(t.voice)}`,
+            ),
+          );
+        }
         return h(
           "li",
-          { attrs: { "data-spk": t.spk } },
+          { attrs: { "data-spk": t.spk }, class: t.voice?.status === "named" ? "voice" : "" },
           dot,
-          h("span", { class: "who" }, t.label),
+          who,
           h("span", { class: "len" }, talkTime(t.seconds)),
         );
       }),
@@ -1608,6 +1631,8 @@ class App {
     ...children: HTMLElement[]
   ): void {
     const pop = byId("popover");
+    this.voicePop = null;
+    delete pop.dataset.remember;
     replace(pop, h("h3", {}, label), ...children);
     pop.setAttribute("aria-label", label);
     pop.hidden = false;
@@ -1634,6 +1659,7 @@ class App {
   }
 
   private closePopover(): void {
+    this.voicePop = null;
     byId("popover").hidden = true;
     this.popoverFrom?.focus();
     this.popoverFrom = null;
@@ -1645,10 +1671,14 @@ class App {
     if (!v || !call) return;
     const roster = v.roster();
     const label = v.speakerLabel(spk);
-    const after = async (p: Promise<{ status: number; body: unknown }>) => {
-      const r = await p;
-      if (r.status >= 400) toast(message(r.body, "that did not work"));
-      else this.closePopover();
+    const after = async (p: Promise<{ status: number; body: unknown }>, done?: string) => {
+      const r = await p.catch(() => null);
+      if (!r) toast("That did not work: akou did not answer.");
+      else if (r.status >= 400) toast(message(r.body, "that did not work"));
+      else {
+        this.closePopover();
+        if (done) toast(done, "info");
+      }
     };
     const name = h("input", {
       value: roster.find((s) => s.spk === spk)?.name ?? "",
@@ -1717,7 +1747,196 @@ class App {
         `Split off ${m.spk.replace(/^c(\d+)$/, "Speaker $1")} (${m.spk})`,
       ),
     );
-    this.openPopover(anchor, `${label} (${spk})`, rename, ...(merge ? [merge] : []), ...unmerge);
+    const title = `${label} (${spk})`;
+    const voice = this.voiceRows(call, spk, after);
+    this.openPopover(
+      anchor,
+      title,
+      rename,
+      ...(voice.el ? [voice.el] : []),
+      ...(merge ? [merge] : []),
+      ...unmerge,
+    );
+    this.voicePop = { call, spk, key: voice.key, el: voice.el, after };
+    const me = roster.find((s) => s.spk === spk);
+    // A name an MCP agent gave teaches akou nothing (it may be a guess): the user can say it is
+    // right, which names the speaker again as the user. Offered only while akou learns voices.
+    const pop = byId("popover");
+    if (me?.name && this.agentNamed(call, spk, me.name)) {
+      pop.dataset.remember = "reading";
+      void this.rememberRow(call, spk, me.name, title, after);
+    } else pop.dataset.remember = "no";
+  }
+
+  /** The speaker popover's voice row while it is open, so a voice that changes redraws it. */
+  private voicePop: {
+    call: string;
+    spk: string;
+    key: string;
+    el: HTMLElement | null;
+    after: (p: Promise<{ status: number; body: unknown }>, done?: string) => Promise<void>;
+  } | null = null;
+
+  /**
+   * What akou found by voice for a speaker, in its popover, after the name field and its one
+   * submit button: "Sounds like Ben", "Yes, it is Ben", which names the speaker Ben (one
+   * `speaker.name`, as a typed name), and "Not Ben", which refuses the name for this speaker.
+   * A refusal takes away no work of the user's, so it does not ask again. `key` says which voice
+   * the row shows; null `el` when there is none.
+   */
+  private voiceRows(
+    call: string,
+    spk: string,
+    after: (p: Promise<{ status: number; body: unknown }>, done?: string) => Promise<void>,
+  ): { key: string; el: HTMLElement | null } {
+    const v = this.view();
+    const voice = v ? callVoices(v).get(v.resolveSpeaker(spk)) : undefined;
+    if (!voice) return { key: "", el: null };
+    const yes = h(
+      "button",
+      {
+        type: "button",
+        class: "voice-yes",
+        on: {
+          click: () =>
+            void after(
+              this.t.request("POST", `/calls/${call}/speakers`, { spk, name: voice.name }),
+            ),
+        },
+      },
+      `Yes, it is ${voice.name}`,
+    );
+    const no = h(
+      "button",
+      {
+        type: "button",
+        class: "voice-no",
+        on: {
+          click: () =>
+            void after(
+              this.t.request("POST", `/calls/${call}/speakers/refuse`, { spk }),
+              "Name taken off this speaker.",
+            ),
+        },
+      },
+      `Not ${voice.name}`,
+    );
+    const el = h(
+      "div",
+      { class: "pop-voice" },
+      h(
+        "p",
+        {},
+        `Sounds like ${voice.name}`,
+        voice.status === "named" ? h("span", { class: "pop-note" }, " (not confirmed)") : null,
+      ),
+      h("div", { class: "pop-row" }, yes, no),
+    );
+    return { key: `${voice.status}:${voice.name}`, el };
+  }
+
+  /**
+   * The voice of the speaker whose popover is open changed (akou withdrew or offered a name, or
+   * someone confirmed or refused it elsewhere): its voice row is drawn again, or goes.
+   */
+  private refreshVoicePop(): void {
+    const p = this.voicePop;
+    const pop = byId("popover");
+    if (!p || pop.hidden || this.callId !== p.call) return;
+    this.dropStaleRemember(p.call, p.spk);
+    const next = this.voiceRows(p.call, p.spk, p.after);
+    if (next.key === p.key) return;
+    if (p.el?.isConnected) {
+      if (next.el) p.el.replaceWith(next.el);
+      else p.el.remove();
+    } else if (next.el) pop.querySelector("form.pop-row")?.after(next.el);
+    this.voicePop = { ...p, key: next.key, el: next.el };
+    this.placePopover();
+  }
+
+  /**
+   * The speaker still shows `name`, and an MCP agent gave it: only then may "Remember this voice"
+   * name it again as the user. A rename or a name typed elsewhere since the popover opened makes
+   * the button's name stale, and pressing it would bring the old name back and teach it.
+   */
+  private agentNamed(call: string, spk: string, name: string): boolean {
+    if (this.callId !== call) return false;
+    const me = this.view()
+      ?.roster()
+      .find((s) => s.spk === spk);
+    return (
+      me?.name === name &&
+      !me.byVoice &&
+      (me.namedBy?.startsWith("agent:") ?? false) &&
+      me.namedBy !== "agent:cli"
+    );
+  }
+
+  /** The open popover's "Remember this voice" goes when its name is no longer the agent's. */
+  private dropStaleRemember(call: string, spk: string): boolean {
+    const pop = byId("popover");
+    const btn = pop.querySelector<HTMLElement>(".voice-remember");
+    if (!btn || this.agentNamed(call, spk, btn.dataset.name ?? "")) return false;
+    btn.closest(".pop-voice")?.remove();
+    pop.dataset.remember = "no";
+    this.placePopover();
+    return true;
+  }
+
+  /**
+   * "Remember this voice" under a name an MCP agent gave, once the settings say akou learns
+   * voices: it names the speaker again with the same name, as the user, which teaches the voice.
+   */
+  private async rememberRow(
+    call: string,
+    spk: string,
+    name: string,
+    title: string,
+    after: (p: Promise<{ status: number; body: unknown }>) => Promise<void>,
+  ): Promise<void> {
+    const r = await this.t
+      .request<{ settings?: Record<string, unknown> }>("GET", "/config")
+      .catch(() => null);
+    const pop = byId("popover");
+    // The popover was closed, or opened on another speaker, meanwhile.
+    if (pop.hidden || pop.getAttribute("aria-label") !== title || this.callId !== call) return;
+    // `data-remember` says what was decided, so a test can wait for it.
+    if (!r || r.status >= 400 || r.body.settings?.["voices.enabled"] !== true) {
+      pop.dataset.remember = "off";
+      return;
+    }
+    pop.dataset.remember = "shown";
+    pop.append(
+      h(
+        "div",
+        { class: "pop-voice" },
+        h(
+          "p",
+          { class: "pop-note" },
+          "An agent named this speaker, so akou did not keep the voice.",
+        ),
+        h(
+          "div",
+          { class: "pop-row" },
+          h(
+            "button",
+            {
+              type: "button",
+              class: "voice-remember",
+              attrs: { "data-name": name },
+              on: {
+                click: () => {
+                  if (this.dropStaleRemember(call, spk)) return;
+                  void after(this.t.request("POST", `/calls/${call}/speakers`, { spk, name }));
+                },
+              },
+            },
+            "Remember this voice",
+          ),
+        ),
+      ),
+    );
+    this.placePopover();
   }
 
   /**
